@@ -16,17 +16,16 @@ needing humans to copy/paste between sessions.
 Three pieces:
 
 ```
-┌─────────────────┐         ┌───────────────────┐         ┌──────────────────┐
-│  Claude Code /  │  MCP    │   mcp_client.py   │  HTTPS  │   server.py      │
-│  Claude Desktop │ ◀────▶  │   (per-instance)  │ ◀────▶  │   (coordinator)  │
-└─────────────────┘         │                   │   WSS   │                  │
-                            │   tray_app.py     │         │   + Web GUI      │
-                            │   (system tray)   │         │                  │
-                            │                   │         └──────────────────┘
-                            │   mesh_hook.py    │
-                            │   (Claude Code    │
-                            │    hook)          │
-                            └───────────────────┘
++-------------------+         +---------------------+         +--------------------+
+|  Claude Code /    |   MCP   |   mcp_client.py     |  HTTPS  |     server.py      |
+|  Claude Desktop   | <-----> |   (per-instance)    | <-----> |    (coordinator)   |
++-------------------+         +---------------------+   WSS   |                    |
+                              |   tray_app.py       |         |    + Web GUI       |
+                              |   (system tray)     |         +--------------------+
+                              |                     |
+                              |   mesh_hook.py      |
+                              |   (Claude Code hook)|
+                              +---------------------+
 ```
 
 ### 1. Server (`server/server.py`)
