@@ -585,20 +585,37 @@ async def set_name(name: str) -> str:
 @mcp.tool()
 async def my_info() -> str:
     """
-    Show this instance's registration details (ID, name, server URL).
+    Show this instance's registration + identity-detection details.
+    Helps diagnose dedup/identity issues across multiple MCP hosts.
     """
-    if not _cfg:
-        return "Not connected. Call connect() first."
     api_key = _cfg.get("api_key", "")
     key_display = (api_key[:13] + "...") if api_key else "(none)"
+
+    # Identity-detection chain
+    detected_id_key = _project_dir()
+    explicit_tag    = os.environ.get("AI_MESH_INSTANCE_KEY")
+    session_var: Optional[str] = None
+    session_val: Optional[str] = None
+    for v in _SESSION_ID_VARS:
+        if os.environ.get(v):
+            session_var, session_val = v, os.environ.get(v)
+            break
+
     return json.dumps(
         {
-            "instance_id": _cfg.get("instance_id"),
-            "name": _cfg.get("name"),
-            "server_url": _cfg.get("server_url", SERVER_URL),
-            "api_key": key_display,
-            "config_file": str(CONFIG_FILE),
-            "connected": _connected,
+            "instance_id":  _cfg.get("instance_id"),
+            "name":         _cfg.get("name"),
+            "server_url":   _cfg.get("server_url", SERVER_URL),
+            "api_key":      key_display,
+            "connected":    _connected,
+            "config_file":  str(CONFIG_FILE),
+            "config_slot":  _CWD_KEY,
+            "identity_key": detected_id_key,
+            "host_tool":    _detect_host_tool(),
+            "explicit_tag (AI_MESH_INSTANCE_KEY)": explicit_tag,
+            "session_id_var":  session_var,
+            "session_id":      session_val,
+            "process_cwd":     str(Path.cwd()),
         },
         indent=2,
     )
