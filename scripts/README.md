@@ -1,6 +1,15 @@
-# Setup scripts
+# Setup & update scripts
 
-One-shot installers for running the AI Mesh **server** persistently.
+One-shot installers and updaters for running the AI Mesh **server** persistently.
+
+| Script | Purpose |
+|---|---|
+| `setup-linux.sh`    | Install on Debian/Ubuntu + systemd |
+| `setup-windows.ps1` | Install on Windows (Scheduled Task) |
+| `update-linux.sh`   | `git pull` + `pip install -r requirements.txt` + restart service |
+| `update-windows.ps1`| Same for Windows |
+
+---
 
 ## Linux (Debian/Ubuntu, systemd)
 
@@ -68,3 +77,24 @@ Because the Scheduled Task runs headless as SYSTEM, the first-run setup
 token isn't visible on a console. The script prints two ways to retrieve
 it — easiest is to stop the task, run uvicorn in the foreground once to
 grab the URL, then re-start the task.
+
+## Updating
+
+After the initial setup, use the update scripts for code refreshes —
+they're much lighter than re-running the installer (no apt/cert work).
+
+**Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Superfish1000/AI-Mesh/main/scripts/update-linux.sh | bash
+```
+
+**Windows:**
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\update-windows.ps1
+```
+
+Both scripts: `git pull` → `pip install -r requirements.txt` → restart
+the service / Scheduled Task. Honors the same `INSTALL_DIR`, `SERVICE_USER`,
+`SERVICE_NAME` (Linux) / `-InstallDir`, `-TaskName` (Windows) overrides as
+the setup scripts.
