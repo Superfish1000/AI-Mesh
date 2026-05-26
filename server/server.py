@@ -1607,16 +1607,6 @@ async function loadDetail(id) {
         <label>System Info</label>
         <div class="sysinfo">${esc(JSON.stringify(sys,null,2))}</div>
       </div>
-      ${isAdmin ? `
-      <div class="detail-item" style="grid-column:1/-1">
-        <label>API Keys (owner)</label>
-        <div id="keyList"><em style="color:#6e7681;font-size:12px">Loading…</em></div>
-        <div class="admin-row" style="margin-top:8px">
-          <input id="keyLabel" class="field" placeholder="Key label (e.g. claude-desktop)">
-          <button class="save-btn" onclick="genKey()">Generate Key</button>
-        </div>
-        <div id="newKey" style="display:none;margin-top:8px;background:#010409;border:1px solid #3fb950;padding:8px;border-radius:5px;font-family:Consolas;font-size:12px;color:#3fb950;word-break:break-all"></div>
-      </div>` : ''}
       ${(isOwner || isAdmin) ? `
       <div class="detail-item" style="grid-column:1/-1;border-top:1px solid #21262d;padding-top:10px">
         <label style="color:#f85149">Danger zone</label>
@@ -1632,45 +1622,6 @@ async function loadDetail(id) {
 
   const ml = document.getElementById('msgList');
   if (ml) ml.scrollTop = ml.scrollHeight;
-
-  if (isAdmin) loadKeys();
-}
-
-// ── API Keys ───────────────────────────────────────────────────────────────────
-async function loadKeys() {
-  const kl = document.getElementById('keyList');
-  if (!kl) return;
-  const r = await fetch('/api/admin/api-keys');
-  const keys = await r.json();
-  if (!keys.length) { kl.innerHTML = '<em style="color:#6e7681;font-size:12px">No keys yet</em>'; return; }
-  kl.innerHTML = keys.map(k => `
-    <div class="key-row">
-      <span class="key-prefix">${esc(k.key_prefix)}…</span>
-      <span class="key-label">${esc(k.label||'(no label)')}</span>
-      <span class="key-meta">${k.last_used ? 'Used '+new Date(k.last_used*1000).toLocaleDateString() : 'Never used'}</span>
-      ${k.revoked ? '<span style="color:#f85149;font-size:11px">Revoked</span>' :
-        `<button class="danger-btn" onclick="revokeKey('${k.id}')">Revoke</button>`}
-    </div>`).join('');
-}
-
-async function genKey() {
-  const label = document.getElementById('keyLabel')?.value || '';
-  const r = await fetch('/api/admin/api-keys', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({label})
-  });
-  const data = await r.json();
-  const nk = document.getElementById('newKey');
-  if (nk) {
-    nk.style.display = 'block';
-    nk.textContent = `⚠ Copy now — shown once:\n${data.key}`;
-  }
-  loadKeys();
-}
-
-async function revokeKey(id) {
-  await fetch(`/api/admin/api-keys/${id}`, {method:'DELETE'});
-  loadKeys();
 }
 
 // ── Messages ───────────────────────────────────────────────────────────────────
