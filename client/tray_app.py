@@ -641,15 +641,15 @@ def open_config(_icon=None, _item=None):
           font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=16, pady=(4, 2))
 
     local_frame = Frame(win, bg="#161b22", bd=0, relief="flat")
-    local_frame.pack(fill="both", expand=True, padx=16, pady=(0, 4))
+    local_frame.pack(fill="x", padx=16, pady=(0, 4))
 
     local_txt = scrolledtext.ScrolledText(
         local_frame, bg="#161b22", fg="#8b949e",
         font=("Consolas", 9), relief="flat", wrap="word",
-        highlightthickness=0, padx=8, pady=6, height=12,
+        highlightthickness=0, padx=8, pady=6, height=10,
         state="disabled",
     )
-    local_txt.pack(fill="both", expand=True)
+    local_txt.pack(fill="x")
 
     def refresh_local():
         all_cfg = _read_all_cfg()
