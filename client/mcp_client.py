@@ -518,12 +518,15 @@ async def set_api_key(key: str) -> str:
         return "Invalid key format. Keys must start with 'mesh_'."
     _cfg = _load_cfg()
     _cfg["api_key"] = key
-    # Clear stale instance_id so connect() re-registers with the new key
-    _cfg.pop("instance_id", None)
+    # Keep any existing instance_id — connect() heartbeats with the new key
+    # first; if the server says the instance belongs to a different user,
+    # it falls through to a fresh /api/register. Same-user rotations
+    # therefore reuse the existing instance row.
     _save_cfg(_cfg)
     prefix = key[:13] + "..."
     return (
-        f"API key saved ({prefix}). Call connect() to register this instance."
+        f"API key saved ({prefix}). Call connect() — reuses your existing "
+        f"instance if the new key shares its owner, otherwise registers fresh."
     )
 
 
