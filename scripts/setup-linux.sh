@@ -209,12 +209,9 @@ RestartSec=5
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# Hardening
+# Hardening (NoNewPrivileges works inside unprivileged LXC;
+# mount-namespace ones like PrivateTmp/ProtectSystem do not)
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$APP_DIR/server
 
 [Install]
 WantedBy=multi-user.target
