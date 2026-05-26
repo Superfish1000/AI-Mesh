@@ -44,6 +44,17 @@ fi
 
 run() { $SUDO "$@"; }
 
+# Run a command as $SERVICE_USER. Works whether we're root or have sudo.
+run_as() {
+    local user="$1"; shift
+    if [ -z "$SUDO" ]; then
+        # We are root — su -s shell -c "quoted-cmd"
+        su -s /bin/bash "$user" -c "$(printf '%q ' "$@")"
+    else
+        sudo -u "$user" "$@"
+    fi
+}
+
 log() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
 
 prompt() {
@@ -119,20 +130,20 @@ fi
 # ── Clone or update repo ─────────────────────────────────────────────────────
 if [ -d "$APP_DIR/.git" ]; then
     log "Updating repo at $APP_DIR"
-    run -u "$SERVICE_USER" git -C "$APP_DIR" pull --ff-only
+    run_as "$SERVICE_USER" git -C "$APP_DIR" pull --ff-only
 else
     log "Cloning repo to $APP_DIR"
     run install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$INSTALL_DIR"
-    run -u "$SERVICE_USER" git clone "$REPO_URL" "$APP_DIR"
+    run_as "$SERVICE_USER" git clone "$REPO_URL" "$APP_DIR"
 fi
 
 # ── Python venv + deps ───────────────────────────────────────────────────────
 log "Setting up Python venv"
 if [ ! -d "$VENV_DIR" ]; then
-    run -u "$SERVICE_USER" python3 -m venv "$VENV_DIR"
+    run_as "$SERVICE_USER" python3 -m venv "$VENV_DIR"
 fi
-run -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install --upgrade pip
-run -u "$SERVICE_USER" "$VENV_DIR/bin/pip" install -r "$APP_DIR/server/requirements.txt"
+run_as "$SERVICE_USER" "$VENV_DIR/bin/pip" install --upgrade pip
+run_as "$SERVICE_USER" "$VENV_DIR/bin/pip" install -r "$APP_DIR/server/requirements.txt"
 
 # ── TLS material ─────────────────────────────────────────────────────────────
 SSL_ARGS=""
@@ -158,7 +169,7 @@ HOOK
         ;;
     self-signed)
         log "Generating self-signed cert"
-        run -u "$SERVICE_USER" "$VENV_DIR/bin/python" "$APP_DIR/server/gen_cert.py"
+        run_as "$SERVICE_USER" "$VENV_DIR/bin/python" "$APP_DIR/server/gen_cert.py"
         CERT_FILE="$APP_DIR/server/cert.pem"
         KEY_FILE="$APP_DIR/server/key.pem"
         SSL_ARGS="--ssl-certfile $CERT_FILE --ssl-keyfile $KEY_FILE"
