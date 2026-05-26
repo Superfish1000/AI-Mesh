@@ -342,8 +342,11 @@ def _user_can_see_instance(user: dict, inst: dict) -> bool:
 
 
 def _instance_messageable_by(sender_owner_id: str, target: dict, sender_is_admin: bool = False) -> bool:
-    """Can sender DM the target instance? Same owner, public target, or admin sender."""
+    """Can sender DM the target instance? Same owner, public target, admin sender,
+    or the special 'admin' GUI pseudo-instance (always reply-able)."""
     if sender_is_admin:
+        return True
+    if target.get("id") == "admin":
         return True
     if target.get("owner_id") == sender_owner_id:
         return True
