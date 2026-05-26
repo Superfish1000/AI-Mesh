@@ -38,8 +38,33 @@ CONFIG_FILE = Path.home() / ".ai-mesh" / "config.json"
 SERVER_URL_DEFAULT = "http://localhost:8000"
 
 # The tray app manages ALL cwd-keyed configs so operators can see and switch
-# between every registered instance on this machine.
+# between every registered instance on this machine. If the launch cwd has no
+# api_key, fall back to the first registered slot that does — so users don't
+# get "not configured" just because they launched the tray from a fresh shell.
 _CWD_KEY: str = str(Path.cwd())
+
+
+def _pick_active_cwd() -> str:
+    """Pick the cwd slot the tray should bind to.
+
+    Prefer this process's cwd; otherwise pick the first slot in the config
+    file that has an api_key. Returns the launch cwd if nothing is configured.
+    """
+    if not CONFIG_FILE.exists():
+        return _CWD_KEY
+    try:
+        all_cfg = json.loads(CONFIG_FILE.read_text())
+    except Exception:
+        return _CWD_KEY
+    if all_cfg.get(_CWD_KEY, {}).get("api_key"):
+        return _CWD_KEY
+    for cwd, cfg in all_cfg.items():
+        if isinstance(cfg, dict) and cfg.get("api_key"):
+            return cwd
+    return _CWD_KEY
+
+
+_CWD_KEY = _pick_active_cwd()
 
 INSTANCE_TYPES = [
     "claude-code",
@@ -522,12 +547,24 @@ def open_config(_icon=None, _item=None):
             return
         lines = []
         for cwd, cfg in all_cfg.items():
-            iid  = cfg.get("instance_id", "?")
-            name = cfg.get("name", "?")
-            marker = " ◀ this" if cwd == _CWD_KEY else ""
-            short_cwd = cwd if len(cwd) <= 40 else "…" + cwd[-38:]
-            lines.append(f"[{iid}] {name}{marker}\n  {short_cwd}")
-        local_lbl.config(text="\n".join(lines))
+            iid    = cfg.get("instance_id", "(unregistered)")
+            name   = cfg.get("name", "(no name)")
+            itype  = cfg.get("instance_type", "claude-code")
+            server = cfg.get("server_url", "(default)")
+            apikey = cfg.get("api_key", "")
+            hookm  = cfg.get("hook_mode", "off")
+            marker = "  ◀ this session" if cwd == _CWD_KEY else ""
+            short_cwd = cwd if len(cwd) <= 56 else "…" + cwd[-54:]
+            key_disp  = (apikey[:13] + "…") if apikey else "(none)"
+            lines.append(
+                f"[{iid}] {name}{marker}\n"
+                f"  cwd:       {short_cwd}\n"
+                f"  server:    {server}\n"
+                f"  type:      {itype}\n"
+                f"  api_key:   {key_disp}\n"
+                f"  hook_mode: {hookm}"
+            )
+        local_lbl.config(text="\n\n".join(lines))
 
     refresh_local()
 
