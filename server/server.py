@@ -1609,9 +1609,23 @@ async function createUser() {
     loadUsers();
   } else {
     const err = await r.json().catch(() => ({detail:'failed'}));
-    msg.textContent = err.detail || 'Failed';
+    msg.textContent = formatErr(err);
     msg.style.color = '#f85149';
   }
+}
+
+function formatErr(err) {
+  // FastAPI returns detail as either a string (HTTPException) or an array
+  // of {loc, msg, type} dicts (validation errors). Render both legibly.
+  const d = err && err.detail;
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) {
+    return d.map(e => {
+      const field = Array.isArray(e.loc) ? e.loc.filter(x => x !== 'body').join('.') : '';
+      return field ? `${field}: ${e.msg}` : e.msg;
+    }).join('; ');
+  }
+  return 'Request failed';
 }
 
 async function deleteUser(id, username) {
