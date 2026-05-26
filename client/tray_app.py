@@ -21,8 +21,8 @@ import time
 import webbrowser
 from pathlib import Path
 from tkinter import (
-    END, BooleanVar, Frame, Label, OptionMenu, StringVar, Text, Tk, Toplevel,
-    messagebox, scrolledtext,
+    END, BooleanVar, Frame, Label, Listbox, OptionMenu, Scrollbar, StringVar,
+    Text, Tk, Toplevel, messagebox, scrolledtext,
 )
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -411,15 +411,50 @@ def open_config(_icon=None, _item=None):
     Label(hdr, text="MCP Client Configuration", bg="#161b22", fg="#8b949e",
           font=("Segoe UI", 9)).pack()
 
-    # ── Status banner ─────────────────────────────────────────────────────────
-    status_color = "#3fb950" if state.connected else "#f85149"
-    status_text  = f"● Connected  (ID: {state.instance_id})" if state.connected else "○ Disconnected"
-    status_lbl = Label(win, text=status_text, bg="#0d1117", fg=status_color,
-                       font=("Segoe UI", 10, "bold"), pady=6)
-    status_lbl.pack(fill="x", padx=16)
+    # ── Instance picker (scrollable column listing every local slot) ─────────
+    Label(win, text="Local Instances", bg="#0d1117", fg="#8b949e",
+          font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=16, pady=(6, 2))
 
-    sep = Frame(win, bg="#21262d", height=1)
-    sep.pack(fill="x", padx=16, pady=4)
+    picker_frame = Frame(win, bg="#161b22")
+    picker_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+    picker_scroll = Scrollbar(picker_frame, orient="vertical")
+    picker_list = Listbox(
+        picker_frame, height=4, bg="#161b22", fg="#e6edf3",
+        selectbackground="#1f6feb", selectforeground="#ffffff",
+        font=("Consolas", 10), relief="flat", borderwidth=0,
+        highlightthickness=0, activestyle="none",
+        yscrollcommand=picker_scroll.set,
+    )
+    picker_scroll.config(command=picker_list.yview)
+    picker_scroll.pack(side="right", fill="y")
+    picker_list.pack(side="left", fill="both", expand=True)
+
+    # Stable ordering of slots → cwd_key list so index → cwd lookup works
+    _picker_cwds: list[str] = []
+
+    def _refresh_picker():
+        nonlocal _picker_cwds
+        _picker_cwds = []
+        picker_list.delete(0, END)
+        all_cfg = _read_all_cfg()
+        with state._lock:
+            slots = dict(state.per_slot)
+        sel_idx = 0
+        for i, (cwd, cfg) in enumerate(all_cfg.items()):
+            _picker_cwds.append(cwd)
+            dot = "●" if slots.get(cwd, {}).get("connected") else "○"
+            name = cfg.get("name") or cfg.get("instance_id") or "(unnamed)"
+            iid  = cfg.get("instance_id", "?")
+            picker_list.insert(END, f" {dot}  {name}  [{iid}]")
+            if cwd == _CWD_KEY:
+                sel_idx = i
+        if _picker_cwds:
+            picker_list.selection_clear(0, END)
+            picker_list.selection_set(sel_idx)
+            picker_list.activate(sel_idx)
+
+    _refresh_picker()
 
     # ── Form ──────────────────────────────────────────────────────────────────
     form = Frame(win, bg="#0d1117")
@@ -429,44 +464,17 @@ def open_config(_icon=None, _item=None):
         Label(form, text=label_text, **lbl_cfg, anchor="w").grid(
             row=row_idx, column=0, sticky="w", **pad)
 
-    # ── Slot picker — drives which local instance's data the form shows ──────
-    def _slot_options() -> list[tuple[str, str]]:
-        """Return [(label, cwd_key), ...] for every local slot."""
-        opts = []
-        for cwd, cfg in _read_all_cfg().items():
-            name = cfg.get("name") or cfg.get("instance_id") or "(unnamed)"
-            iid  = cfg.get("instance_id", "?")
-            opts.append((f"{name}  [{iid}]", cwd))
-        return opts
-
-    options = _slot_options()
-    if not options:
-        options = [(f"(no slots) — using {_CWD_KEY}", _CWD_KEY)]
-    initial_label = next((lbl for lbl, cwd in options if cwd == _CWD_KEY), options[0][0])
-
-    row("Instance", 0)
-    sv_slot = StringVar(value=initial_label)
-    slot_labels = [lbl for lbl, _ in options]
-    slot_menu = OptionMenu(form, sv_slot, *slot_labels)
-    slot_menu.config(bg="#161b22", fg="#e6edf3", relief="flat",
-                     font=("Segoe UI", 10), highlightthickness=0,
-                     activebackground="#21262d", activeforeground="#e6edf3",
-                     bd=0, cursor="hand2")
-    slot_menu["menu"].config(bg="#161b22", fg="#e6edf3", relief="flat",
-                              activebackground="#1f6feb")
-    slot_menu.grid(row=0, column=1, sticky="ew", **pad)
-
-    row("Server URL", 1)
+    row("Server URL", 0)
     sv_url = StringVar(value=state.server_url)
     url_entry = tk.Entry(form, textvariable=sv_url, width=38, **entry_cfg)
-    url_entry.grid(row=1, column=1, sticky="ew", **pad)
+    url_entry.grid(row=0, column=1, sticky="ew", **pad)
 
-    row("Instance Name", 2)
+    row("Instance Name", 1)
     sv_name = StringVar(value=state.name)
     name_entry = tk.Entry(form, textvariable=sv_name, width=38, **entry_cfg)
-    name_entry.grid(row=2, column=1, sticky="ew", **pad)
+    name_entry.grid(row=1, column=1, sticky="ew", **pad)
 
-    row("Instance Type", 3)
+    row("Instance Type", 2)
     sv_type = StringVar(value=state.cfg.get("instance_type", "claude-code"))
     type_menu = OptionMenu(form, sv_type, *INSTANCE_TYPES)
     type_menu.config(bg="#161b22", fg="#e6edf3", relief="flat",
@@ -475,15 +483,15 @@ def open_config(_icon=None, _item=None):
                      bd=0, cursor="hand2")
     type_menu["menu"].config(bg="#161b22", fg="#e6edf3", relief="flat",
                               activebackground="#1f6feb")
-    type_menu.grid(row=3, column=1, sticky="w", **pad)
+    type_menu.grid(row=2, column=1, sticky="w", **pad)
 
     # API key row — show prefix only (mask actual key after save)
-    row("API Key", 4)
+    row("API Key", 3)
     existing_key = state.api_key
     key_display = (existing_key[:13] + "...") if existing_key else ""
     sv_apikey = StringVar(value=key_display)
     apikey_frame = Frame(form, bg="#0d1117")
-    apikey_frame.grid(row=4, column=1, sticky="ew", **pad)
+    apikey_frame.grid(row=3, column=1, sticky="ew", **pad)
     apikey_entry = tk.Entry(apikey_frame, textvariable=sv_apikey, width=28,
                             show="", **entry_cfg)
     apikey_entry.pack(side="left", fill="x", expand=True)
@@ -515,36 +523,64 @@ def open_config(_icon=None, _item=None):
               activebackground="#388bfd", activeforeground="#fff",
               bd=0).pack(side="left", padx=(6, 0))
 
-    iid_lbl = Label(form, text=state.instance_id or "(none)", **val_cfg, anchor="w")
-    if state.instance_id:
-        row("Instance ID", 5)
-        iid_lbl.grid(row=5, column=1, sticky="w", **pad)
+    # Instance ID row carries the live ●/○ status indicator now (status banner removed)
+    row("Instance ID", 4)
+    iid_frame = Frame(form, bg="#0d1117")
+    iid_frame.grid(row=4, column=1, sticky="w", **pad)
+    status_dot_lbl = Label(iid_frame, text="○", bg="#0d1117", fg="#f85149",
+                           font=("Segoe UI", 11, "bold"))
+    status_dot_lbl.pack(side="left", padx=(0, 6))
+    iid_lbl = Label(iid_frame, text=state.instance_id or "(none)", **val_cfg, anchor="w")
+    iid_lbl.pack(side="left")
+    status_text_lbl = Label(iid_frame, text="", bg="#0d1117", fg="#8b949e",
+                            font=("Segoe UI", 9))
+    status_text_lbl.pack(side="left", padx=(10, 0))
+
+    def _refresh_status_indicator():
+        slot_info = state.per_slot.get(_CWD_KEY, {})
+        if slot_info.get("connected"):
+            status_dot_lbl.config(text="●", fg="#3fb950")
+            status_text_lbl.config(text="Connected", fg="#3fb950")
+        else:
+            status_dot_lbl.config(text="○", fg="#f85149")
+            status_text_lbl.config(text="Disconnected", fg="#f85149")
+
+    _refresh_status_indicator()
 
     form.columnconfigure(1, weight=1)
 
-    # ── Slot switching: when the picker changes, rebind state to that slot ───
-    def _on_slot_change(_label: str):
+    # ── Slot switching: when the listbox selection changes, rebind state ─────
+    def _on_picker_select(_evt=None):
         global _CWD_KEY
-        # Find the cwd for the selected label
-        cur_options = _slot_options()
-        cwd = next((c for lbl, c in cur_options if lbl == _label), _CWD_KEY)
+        sel = picker_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(_picker_cwds):
+            return
+        cwd = _picker_cwds[idx]
         _CWD_KEY = cwd
         state.cfg = load_cfg(cwd)
-        # Repopulate form
         sv_url.set(state.server_url)
         sv_name.set(state.name)
         sv_type.set(state.cfg.get("instance_type", "claude-code"))
         ek = state.api_key
         sv_apikey.set((ek[:13] + "...") if ek else "")
         iid_lbl.config(text=state.instance_id or "(none)")
-        # Status banner refresh
-        slot_info = state.per_slot.get(cwd, {})
-        if slot_info.get("connected"):
-            status_lbl.config(text=f"● Connected  (ID: {state.instance_id})", fg="#3fb950")
-        else:
-            status_lbl.config(text="○ Disconnected", fg="#f85149")
+        _refresh_status_indicator()
 
-    sv_slot.trace_add("write", lambda *_: _on_slot_change(sv_slot.get()))
+    picker_list.bind("<<ListboxSelect>>", _on_picker_select)
+
+    # Auto-refresh the picker (status dots, new slots) every 5s
+    def _picker_tick():
+        try:
+            _refresh_picker()
+            _refresh_status_indicator()
+            win.after(5000, _picker_tick)
+        except Exception:
+            pass
+
+    win.after(5000, _picker_tick)
 
     sep2 = Frame(win, bg="#21262d", height=1)
     sep2.pack(fill="x", padx=16, pady=4)
@@ -621,10 +657,10 @@ def open_config(_icon=None, _item=None):
 
                 win.after(0, lambda: [
                     set_msg(f"Connected! ID: {iid}", "#3fb950"),
-                    status_lbl.config(
-                        text=f"● Connected  (ID: {iid})",
-                        fg="#3fb950"
-                    ),
+                    iid_lbl.config(text=iid),
+                    status_dot_lbl.config(text="●", fg="#3fb950"),
+                    status_text_lbl.config(text="Connected", fg="#3fb950"),
+                    _refresh_picker(),
                     btn_connect.config(state="normal"),
                 ])
             except Exception as e:
@@ -658,7 +694,10 @@ def open_config(_icon=None, _item=None):
         state.cfg.pop("instance_id", None)
         state.connected = False
         save_cfg(state.cfg)
-        status_lbl.config(text="○ Disconnected", fg="#f85149")
+        iid_lbl.config(text="(none)")
+        status_dot_lbl.config(text="○", fg="#f85149")
+        status_text_lbl.config(text="Disconnected", fg="#f85149")
+        _refresh_picker()
         set_msg("Disconnected. Config cleared.", "#8b949e")
 
     def do_open_gui():
