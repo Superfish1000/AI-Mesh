@@ -429,17 +429,44 @@ def open_config(_icon=None, _item=None):
         Label(form, text=label_text, **lbl_cfg, anchor="w").grid(
             row=row_idx, column=0, sticky="w", **pad)
 
-    row("Server URL", 0)
+    # ── Slot picker — drives which local instance's data the form shows ──────
+    def _slot_options() -> list[tuple[str, str]]:
+        """Return [(label, cwd_key), ...] for every local slot."""
+        opts = []
+        for cwd, cfg in _read_all_cfg().items():
+            name = cfg.get("name") or cfg.get("instance_id") or "(unnamed)"
+            iid  = cfg.get("instance_id", "?")
+            opts.append((f"{name}  [{iid}]", cwd))
+        return opts
+
+    options = _slot_options()
+    if not options:
+        options = [(f"(no slots) — using {_CWD_KEY}", _CWD_KEY)]
+    initial_label = next((lbl for lbl, cwd in options if cwd == _CWD_KEY), options[0][0])
+
+    row("Instance", 0)
+    sv_slot = StringVar(value=initial_label)
+    slot_labels = [lbl for lbl, _ in options]
+    slot_menu = OptionMenu(form, sv_slot, *slot_labels)
+    slot_menu.config(bg="#161b22", fg="#e6edf3", relief="flat",
+                     font=("Segoe UI", 10), highlightthickness=0,
+                     activebackground="#21262d", activeforeground="#e6edf3",
+                     bd=0, cursor="hand2")
+    slot_menu["menu"].config(bg="#161b22", fg="#e6edf3", relief="flat",
+                              activebackground="#1f6feb")
+    slot_menu.grid(row=0, column=1, sticky="ew", **pad)
+
+    row("Server URL", 1)
     sv_url = StringVar(value=state.server_url)
     url_entry = tk.Entry(form, textvariable=sv_url, width=38, **entry_cfg)
-    url_entry.grid(row=0, column=1, sticky="ew", **pad)
+    url_entry.grid(row=1, column=1, sticky="ew", **pad)
 
-    row("Instance Name", 1)
+    row("Instance Name", 2)
     sv_name = StringVar(value=state.name)
     name_entry = tk.Entry(form, textvariable=sv_name, width=38, **entry_cfg)
-    name_entry.grid(row=1, column=1, sticky="ew", **pad)
+    name_entry.grid(row=2, column=1, sticky="ew", **pad)
 
-    row("Instance Type", 2)
+    row("Instance Type", 3)
     sv_type = StringVar(value=state.cfg.get("instance_type", "claude-code"))
     type_menu = OptionMenu(form, sv_type, *INSTANCE_TYPES)
     type_menu.config(bg="#161b22", fg="#e6edf3", relief="flat",
@@ -448,15 +475,15 @@ def open_config(_icon=None, _item=None):
                      bd=0, cursor="hand2")
     type_menu["menu"].config(bg="#161b22", fg="#e6edf3", relief="flat",
                               activebackground="#1f6feb")
-    type_menu.grid(row=2, column=1, sticky="w", **pad)
+    type_menu.grid(row=3, column=1, sticky="w", **pad)
 
     # API key row — show prefix only (mask actual key after save)
-    row("API Key", 3)
+    row("API Key", 4)
     existing_key = state.api_key
     key_display = (existing_key[:13] + "...") if existing_key else ""
     sv_apikey = StringVar(value=key_display)
     apikey_frame = Frame(form, bg="#0d1117")
-    apikey_frame.grid(row=3, column=1, sticky="ew", **pad)
+    apikey_frame.grid(row=4, column=1, sticky="ew", **pad)
     apikey_entry = tk.Entry(apikey_frame, textvariable=sv_apikey, width=28,
                             show="", **entry_cfg)
     apikey_entry.pack(side="left", fill="x", expand=True)
@@ -488,12 +515,36 @@ def open_config(_icon=None, _item=None):
               activebackground="#388bfd", activeforeground="#fff",
               bd=0).pack(side="left", padx=(6, 0))
 
+    iid_lbl = Label(form, text=state.instance_id or "(none)", **val_cfg, anchor="w")
     if state.instance_id:
-        row("Instance ID", 4)
-        Label(form, text=state.instance_id, **val_cfg, anchor="w").grid(
-            row=4, column=1, sticky="w", **pad)
+        row("Instance ID", 5)
+        iid_lbl.grid(row=5, column=1, sticky="w", **pad)
 
     form.columnconfigure(1, weight=1)
+
+    # ── Slot switching: when the picker changes, rebind state to that slot ───
+    def _on_slot_change(_label: str):
+        global _CWD_KEY
+        # Find the cwd for the selected label
+        cur_options = _slot_options()
+        cwd = next((c for lbl, c in cur_options if lbl == _label), _CWD_KEY)
+        _CWD_KEY = cwd
+        state.cfg = load_cfg(cwd)
+        # Repopulate form
+        sv_url.set(state.server_url)
+        sv_name.set(state.name)
+        sv_type.set(state.cfg.get("instance_type", "claude-code"))
+        ek = state.api_key
+        sv_apikey.set((ek[:13] + "...") if ek else "")
+        iid_lbl.config(text=state.instance_id or "(none)")
+        # Status banner refresh
+        slot_info = state.per_slot.get(cwd, {})
+        if slot_info.get("connected"):
+            status_lbl.config(text=f"● Connected  (ID: {state.instance_id})", fg="#3fb950")
+        else:
+            status_lbl.config(text="○ Disconnected", fg="#f85149")
+
+    sv_slot.trace_add("write", lambda *_: _on_slot_change(sv_slot.get()))
 
     sep2 = Frame(win, bg="#21262d", height=1)
     sep2.pack(fill="x", padx=16, pady=4)
