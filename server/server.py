@@ -928,12 +928,29 @@ async def ws_instance(ws: WebSocket, api_key: str = "", instance_id: str = ""):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/instances")
-async def list_instances(mesh_session: Optional[str] = Cookie(default=None)):
+async def list_instances(
+    mesh_session: Optional[str]  = Cookie(default=None),
+    x_api_key: Optional[str]     = Header(default=None),
+    x_instance_id: Optional[str] = Header(default=None),
+):
+    # Accept either auth method: web GUI session OR an instance's API key.
     user = _session_user(mesh_session)
-    if not user:
-        raise HTTPException(401, "Login required")
+    owner_id = None
+    is_admin = False
+    if user:
+        owner_id = user["id"]
+        is_admin = bool(user["is_admin"])
+    elif x_api_key:
+        key_row = _resolve_api_key(x_api_key)
+        if not key_row:
+            raise HTTPException(401, "Invalid X-API-Key")
+        owner_id = key_row["owner_id"]
+        # Instance callers are not admins for this purpose
+    else:
+        raise HTTPException(401, "Login or X-API-Key required")
+
     with db() as conn:
-        if user["is_admin"]:
+        if is_admin:
             rows = conn.execute(
                 """SELECT i.*, u.username AS owner_username
                    FROM instances i LEFT JOIN users u ON i.owner_id = u.id
@@ -945,7 +962,7 @@ async def list_instances(mesh_session: Optional[str] = Cookie(default=None)):
                    FROM instances i LEFT JOIN users u ON i.owner_id = u.id
                    WHERE i.owner_id = ? OR i.visibility = 'public'
                    ORDER BY i.last_seen DESC""",
-                (user["id"],),
+                (owner_id,),
             ).fetchall()
     out = []
     for r in rows:

@@ -404,9 +404,11 @@ async def check_inbox() -> str:
     for m in msgs:
         ts = time.strftime("%H:%M:%S", time.localtime(m.get("timestamp", 0)))
         sender = m.get("from_name") or m.get("from_id", "?")
+        fid = m.get("from_id", "?")
         to = m.get("to_id")
         target = f"→ {to}" if to else "(broadcast)"
-        lines.append(f"[{ts}] {sender} {target}: {m.get('content','')}")
+        lines.append(f"[{ts}] {sender} [from_id={fid}] {target}: {m.get('content','')}")
+    lines.append("\nTo reply, call send_message(content, to_instance_id=<from_id of the message you want to answer>).")
 
     return "\n".join(lines)
 
@@ -434,9 +436,10 @@ async def get_messages(limit: int = 20) -> str:
     for m in msgs:
         ts = time.strftime("%H:%M:%S", time.localtime(m.get("timestamp", 0)))
         sender = m.get("from_display") or m.get("from_name") or m.get("from_id", "?")
+        fid = m.get("from_id", "?")
         to = m.get("to_id")
         target = f"→ {to}" if to else "(broadcast)"
-        lines.append(f"[{ts}] {sender} {target}: {m.get('content','')}")
+        lines.append(f"[{ts}] {sender} [from_id={fid}] {target}: {m.get('content','')}")
 
     return "\n".join(lines)
 
