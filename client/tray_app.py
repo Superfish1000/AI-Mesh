@@ -62,8 +62,19 @@ def _project_dir() -> str:
     for var in _PROJECT_DIR_VARS:
         v = os.environ.get(var)
         if v:
-            return str(Path(v).resolve())
-    return str(Path.cwd().resolve())
+            return _normalize_path(v)
+    return _normalize_path(str(Path.cwd()))
+
+
+def _normalize_path(p: str) -> str:
+    """Match mcp_client._normalize_path: lowercase on Windows for stable slot keys."""
+    try:
+        resolved = Path(p).resolve()
+        if sys.platform == "win32":
+            return str(resolved).lower()
+        return str(resolved)
+    except Exception:
+        return p
 
 
 # The tray app manages ALL cwd-keyed configs so operators can see and switch

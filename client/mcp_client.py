@@ -97,8 +97,21 @@ def _project_dir() -> str:
     for var in _PROJECT_DIR_VARS:
         v = os.environ.get(var)
         if v:
-            return str(Path(v).resolve())
-    return str(Path.cwd().resolve())
+            return _normalize_path(v)
+    return _normalize_path(str(Path.cwd()))
+
+
+def _normalize_path(p: str) -> str:
+    """Return a canonical, case-consistent path so Windows case-insensitivity
+    doesn't fragment config slots (C:\\WINDOWS\\system32 vs C:\\Windows\\System32)."""
+    try:
+        resolved = Path(p).resolve()
+        if sys.platform == "win32":
+            # On Windows, lowercase the whole path for stable slot keys
+            return str(resolved).lower()
+        return str(resolved)
+    except Exception:
+        return p
 
 
 # Key used to isolate this instance's config from others on the same machine.
