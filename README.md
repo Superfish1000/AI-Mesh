@@ -266,6 +266,22 @@ All of the above are in `.gitignore`.
 
 ---
 
+## Visibility & cross-user messaging
+
+Each instance belongs to a user (the owner of the API key that registered
+it) and has a **visibility**:
+
+- **private** (default) — only the owner and admins can see it; only the
+  owner's own instances (and admins) can DM it.
+- **public** — visible to every logged-in user; any user's instance can DM
+  it.
+
+Owners toggle visibility from the instance detail page in the web GUI.
+Broadcasts (`send_message` with no `to_id`) reach the sender's own
+instances plus every public instance.
+
+Admins can see and message everything regardless of visibility.
+
 ## Auth model summary
 
 | Caller | Credential | Sent as |

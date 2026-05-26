@@ -154,6 +154,7 @@ def init_db():
                 system_info    TEXT DEFAULT '{}',
                 notes          TEXT DEFAULT '',
                 owner_id       TEXT,
+                visibility     TEXT DEFAULT 'private',
                 last_seen      REAL,
                 created_at     REAL,
                 connected      INTEGER DEFAULT 0
@@ -168,6 +169,12 @@ def init_db():
                 read      INTEGER DEFAULT 0
             );
         """)
+
+        # Backward-compat: add visibility column to existing instances table
+        try:
+            conn.execute("ALTER TABLE instances ADD COLUMN visibility TEXT DEFAULT 'private'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         # Bootstrap: if no users exist, generate a one-time setup token
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -320,6 +327,24 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> di
         raise HTTPException(401, "Valid X-API-Key required (format: mesh_...)")
     return key_row
 
+
+def _user_can_see_instance(user: dict, inst: dict) -> bool:
+    """A user can see their own instances, any public instance, or all if admin."""
+    if user.get("is_admin"):
+        return True
+    if inst.get("owner_id") == user["id"]:
+        return True
+    return inst.get("visibility") == "public"
+
+
+def _instance_messageable_by(sender_owner_id: str, target: dict, sender_is_admin: bool = False) -> bool:
+    """Can sender DM the target instance? Same owner, public target, or admin sender."""
+    if sender_is_admin:
+        return True
+    if target.get("owner_id") == sender_owner_id:
+        return True
+    return target.get("visibility") == "public"
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -336,6 +361,7 @@ class UpdateInstanceRequest(BaseModel):
     name: Optional[str]         = None
     display_name: Optional[str] = None
     notes: Optional[str]        = None
+    visibility: Optional[str]   = None  # 'private' | 'public', owner-settable
 
 class CreateUserRequest(BaseModel):
     username: str
@@ -618,6 +644,18 @@ async def send_message(req: SendMessageRequest, x_api_key: Optional[str] = Heade
     if not inst:
         raise HTTPException(404, "No connected instance found for this API key")
 
+    # If DMing, verify the sender is allowed to message the target
+    if req.to_id:
+        with db() as conn:
+            target = conn.execute(
+                "SELECT id, owner_id, visibility FROM instances WHERE id = ?",
+                (req.to_id,),
+            ).fetchone()
+        if not target:
+            raise HTTPException(404, "Target instance not found")
+        if not _instance_messageable_by(key_row["owner_id"], dict(target)):
+            raise HTTPException(403, "Target instance is private and not owned by you")
+
     msg_id = uuid.uuid4().hex
     now    = time.time()
     with db() as conn:
@@ -638,7 +676,15 @@ async def send_message(req: SendMessageRequest, x_api_key: Optional[str] = Heade
     if req.to_id:
         await instances_ws.send(req.to_id, event)
     else:
-        await instances_ws.broadcast(event, exclude=inst["id"])
+        # Broadcast only to instances the sender can reach: own + public
+        with db() as conn:
+            recipients = conn.execute(
+                """SELECT id FROM instances
+                   WHERE id != ? AND (owner_id = ? OR visibility = 'public')""",
+                (inst["id"], key_row["owner_id"]),
+            ).fetchall()
+        for r in recipients:
+            await instances_ws.send(r["id"], event)
     await admins_ws.broadcast(event)
     return {"message_id": msg_id}
 
@@ -700,6 +746,10 @@ async def update_instance(
         updates["notes"] = req.notes
     if req.name is not None and is_owner:
         updates["name"] = req.name
+    if req.visibility is not None and (is_owner or is_admin):
+        if req.visibility not in ("private", "public"):
+            raise HTTPException(400, "visibility must be 'private' or 'public'")
+        updates["visibility"] = req.visibility
 
     if updates:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -771,9 +821,20 @@ async def list_instances(mesh_session: Optional[str] = Cookie(default=None)):
     if not user:
         raise HTTPException(401, "Login required")
     with db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM instances ORDER BY last_seen DESC"
-        ).fetchall()
+        if user["is_admin"]:
+            rows = conn.execute(
+                """SELECT i.*, u.username AS owner_username
+                   FROM instances i LEFT JOIN users u ON i.owner_id = u.id
+                   ORDER BY i.last_seen DESC"""
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT i.*, u.username AS owner_username
+                   FROM instances i LEFT JOIN users u ON i.owner_id = u.id
+                   WHERE i.owner_id = ? OR i.visibility = 'public'
+                   ORDER BY i.last_seen DESC""",
+                (user["id"],),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -784,10 +845,15 @@ async def get_instance(instance_id: str, mesh_session: Optional[str] = Cookie(de
         raise HTTPException(401, "Login required")
     with db() as conn:
         row = conn.execute(
-            "SELECT * FROM instances WHERE id = ?", (instance_id,)
+            """SELECT i.*, u.username AS owner_username
+               FROM instances i LEFT JOIN users u ON i.owner_id = u.id
+               WHERE i.id = ?""",
+            (instance_id,),
         ).fetchone()
         if not row:
             raise HTTPException(404)
+        if not _user_can_see_instance(user, dict(row)):
+            raise HTTPException(403, "Not authorized to view this instance")
         msgs = conn.execute(
             """SELECT m.*, i.name as from_name, i.display_name as from_display
                FROM messages m
@@ -804,6 +870,20 @@ async def admin_message(req: AdminMessageRequest, mesh_session: Optional[str] = 
     user = _session_user(mesh_session)
     if not user:
         raise HTTPException(401, "Login required")
+    is_admin = bool(user["is_admin"])
+
+    # Permission check: non-admins can only DM instances they can see, or
+    # broadcast (which we filter to their visible set below)
+    if req.to_id:
+        with db() as conn:
+            target = conn.execute(
+                "SELECT id, owner_id, visibility FROM instances WHERE id = ?",
+                (req.to_id,),
+            ).fetchone()
+        if not target:
+            raise HTTPException(404, "Target instance not found")
+        if not _instance_messageable_by(user["id"], dict(target), is_admin):
+            raise HTTPException(403, "Target instance is private and not owned by you")
 
     msg_id = uuid.uuid4().hex
     now    = time.time()
@@ -830,8 +910,18 @@ async def admin_message(req: AdminMessageRequest, mesh_session: Optional[str] = 
     }
     if req.to_id:
         await instances_ws.send(req.to_id, event)
-    else:
+    elif is_admin:
         await instances_ws.broadcast(event)
+    else:
+        # Non-admin broadcast: only to instances this user can reach
+        with db() as conn:
+            recipients = conn.execute(
+                """SELECT id FROM instances
+                   WHERE id != 'admin' AND (owner_id = ? OR visibility = 'public')""",
+                (user["id"],),
+            ).fetchall()
+        for r in recipients:
+            await instances_ws.send(r["id"], event)
     await admins_ws.broadcast(event)
     return {"message_id": msg_id}
 
@@ -1117,6 +1207,30 @@ input.field{flex:1}textarea.field{width:100%;resize:vertical;min-height:54px}
 .admin-panel h3{font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
 .admin-row{display:flex;gap:8px;margin-bottom:6px;align-items:center}
 .admin-row input{background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:5px;padding:5px 9px;font-size:12px;flex:1}
+
+/* Owner + visibility badges on sidebar */
+.iown{font-size:10px;color:#6e7681;margin-top:2px;display:flex;align-items:center;gap:6px}
+.vis-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.vis-public{background:#0d2918;color:#3fb950;border:1px solid #2ea04380}
+.vis-private{background:#1f0d0d;color:#f85149;border:1px solid #b91c1c80}
+
+/* Modal */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:#161b22;border:1px solid #30363d;border-radius:8px;width:520px;max-width:92vw;max-height:80vh;overflow:auto;display:flex;flex-direction:column}
+.modal-head{padding:14px 18px;border-bottom:1px solid #21262d;display:flex;align-items:center;justify-content:space-between}
+.modal-head h2{font-size:15px;font-weight:600;color:#58a6ff}
+.modal-close{background:transparent;border:none;color:#8b949e;font-size:20px;cursor:pointer;line-height:1}
+.modal-body{padding:14px 18px}
+.user-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #21262d;font-size:13px}
+.user-row .uname{flex:1;font-weight:500}
+.user-row .uflag{font-size:10px;padding:1px 6px;border-radius:3px;background:#0d2918;color:#3fb950;border:1px solid #2ea04380;text-transform:uppercase;letter-spacing:.04em}
+.user-form{display:grid;grid-template-columns:1fr 1fr auto auto;gap:6px;margin-top:14px;align-items:center}
+.user-form input{background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:5px;padding:6px 9px;font-size:12px}
+.user-form label{font-size:11px;color:#8b949e;display:flex;align-items:center;gap:5px}
+
+/* Header user link */
+.users-btn{color:#fff;background:#21262d;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px}
+.users-btn:hover{background:#30363d}
 </style>
 </head>
 <body>
@@ -1125,6 +1239,7 @@ input.field{flex:1}textarea.field{width:100%;resize:vertical;min-height:54px}
   <span class="sub">Coordination Server</span>
   <div class="header-right">
     <span class="user-badge" id="userBadge"></span>
+    <button id="usersBtn" class="users-btn" style="display:none" onclick="openUsersModal()">👥 Users</button>
     <a href="/download/mcp-client" class="dl-btn">⬇ MCP Client</a>
     <form method="post" action="/auth/logout" style="display:inline">
       <button class="logout-btn" type="submit">Sign out</button>
@@ -1159,6 +1274,7 @@ async function init() {
   if (!me) { location.href = '/login'; return; }
   S.me = me;
   document.getElementById('userBadge').textContent = `👤 ${me.username}${me.is_admin ? ' (admin)' : ''}`;
+  if (me.is_admin) document.getElementById('usersBtn').style.display = 'inline-block';
 
   const wt = await fetch('/api/ws-token').then(r => r.json());
   S.wsToken = wt.token;
@@ -1209,9 +1325,15 @@ function renderSidebar(list) {
   el.innerHTML = list.map(i => {
     const name = esc(i.display_name || i.name);
     const sys  = safeJson(i.system_info);
+    const vis  = i.visibility === 'public' ? 'public' : 'private';
+    const owner = i.owner_username ? `owned by ${esc(i.owner_username)}` : '';
     return `<div class="instance-item${S.selected===i.id?' active':''}" onclick="selectInstance('${i.id}')">
       <div class="iname"><span class="dot ${i.connected?'on':'off'}"></span>${name}</div>
       <div class="itype">${esc(i.instance_type)} · ${i.id}</div>
+      <div class="iown">
+        <span class="vis-badge vis-${vis}">${vis === 'public' ? '🌐 public' : '🔒 private'}</span>
+        <span>${owner}</span>
+      </div>
       <div class="ihost">${esc(sys.hostname||'')}</div>
     </div>`;
   }).join('');
@@ -1245,6 +1367,7 @@ async function loadDetail(id) {
   const sys  = safeJson(inst.system_info);
   const displayName = esc(inst.display_name || inst.name);
   const isAdmin = S.me && S.me.is_admin;
+  const isOwner = S.me && inst.owner_id === S.me.id;
 
   document.getElementById('panel').innerHTML = `
     <div class="panel-header">
@@ -1263,6 +1386,23 @@ async function loadDetail(id) {
       <div class="detail-item">
         <label>Self-Set Name</label>
         <div class="val">${esc(inst.name)}</div>
+      </div>
+      <div class="detail-item">
+        <label>Owner</label>
+        <div class="val">${esc(inst.owner_username || '(none)')}</div>
+      </div>
+      <div class="detail-item">
+        <label>Visibility</label>
+        ${(isOwner || isAdmin) ? `
+          <div class="edit-row">
+            <select class="field" id="visSelect">
+              <option value="private" ${inst.visibility !== 'public' ? 'selected' : ''}>🔒 Private (only you)</option>
+              <option value="public"  ${inst.visibility === 'public' ? 'selected' : ''}>🌐 Public (any user can DM)</option>
+            </select>
+            <button class="save-btn" onclick="saveVisibility('${inst.id}')">Save</button>
+          </div>` : `
+          <div class="val"><span class="vis-badge vis-${inst.visibility === 'public' ? 'public' : 'private'}">${inst.visibility === 'public' ? '🌐 public' : '🔒 private'}</span></div>
+        `}
       </div>
       ${isAdmin ? `
       <div class="detail-item" style="grid-column:1/-1">
@@ -1385,6 +1525,100 @@ async function saveOverride(id) {
 async function saveNotes(id) {
   const val = document.getElementById('notesArea')?.value;
   await fetch(`/api/instances/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({notes:val})});
+}
+
+async function saveVisibility(id) {
+  const val = document.getElementById('visSelect')?.value;
+  const r = await fetch(`/api/instances/${id}`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({visibility:val})
+  });
+  if (r.ok) { loadInstances(); loadDetail(id); }
+  else alert('Failed to update visibility');
+}
+
+// ── Users modal (admin only) ───────────────────────────────────────────────────
+function openUsersModal() {
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.id = 'usersModal';
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-head">
+        <h2>👥 Users</h2>
+        <button class="modal-close" onclick="closeUsersModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="userList"><em style="color:#6e7681">Loading…</em></div>
+        <div class="user-form">
+          <input id="newUsername" placeholder="username">
+          <input id="newPassword" type="password" placeholder="password (min 8)">
+          <label><input type="checkbox" id="newIsAdmin"> admin</label>
+          <button class="save-btn" onclick="createUser()">Add User</button>
+        </div>
+        <div id="userFormMsg" style="margin-top:8px;font-size:12px"></div>
+      </div>
+    </div>`;
+  modal.onclick = e => { if (e.target === modal) closeUsersModal(); };
+  document.body.appendChild(modal);
+  loadUsers();
+}
+
+function closeUsersModal() {
+  document.getElementById('usersModal')?.remove();
+}
+
+async function loadUsers() {
+  const r = await fetch('/api/admin/users');
+  if (!r.ok) {
+    document.getElementById('userList').innerHTML = '<em style="color:#f85149">Failed to load users</em>';
+    return;
+  }
+  const users = await r.json();
+  const el = document.getElementById('userList');
+  el.innerHTML = users.map(u => `
+    <div class="user-row">
+      <span class="uname">${esc(u.username)}</span>
+      ${u.is_admin ? '<span class="uflag">admin</span>' : ''}
+      <span style="color:#6e7681;font-size:11px">${new Date(u.created_at*1000).toLocaleDateString()}</span>
+      ${u.id === S.me.id ? '<span style="color:#8b949e;font-size:11px">(you)</span>' :
+        `<button class="danger-btn" onclick="deleteUser('${u.id}','${esc(u.username)}')">Delete</button>`}
+    </div>`).join('');
+}
+
+async function createUser() {
+  const username = document.getElementById('newUsername').value.trim();
+  const password = document.getElementById('newPassword').value;
+  const is_admin = document.getElementById('newIsAdmin').checked;
+  const msg = document.getElementById('userFormMsg');
+  if (!username || password.length < 8) {
+    msg.textContent = 'Username required, password ≥ 8 chars';
+    msg.style.color = '#f85149';
+    return;
+  }
+  const r = await fetch('/api/admin/users', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username, password, is_admin})
+  });
+  if (r.ok) {
+    msg.textContent = `User '${username}' created.`;
+    msg.style.color = '#3fb950';
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newPassword').value = '';
+    document.getElementById('newIsAdmin').checked = false;
+    loadUsers();
+  } else {
+    const err = await r.json().catch(() => ({detail:'failed'}));
+    msg.textContent = err.detail || 'Failed';
+    msg.style.color = '#f85149';
+  }
+}
+
+async function deleteUser(id, username) {
+  if (!confirm(`Delete user '${username}'? Their API keys will be revoked.`)) return;
+  const r = await fetch(`/api/admin/users/${id}`, {method:'DELETE'});
+  if (r.ok) loadUsers();
+  else alert('Failed to delete user');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
