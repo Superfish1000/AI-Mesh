@@ -20,10 +20,12 @@ import asyncio
 import json
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -709,6 +711,177 @@ async def get_hook_mode() -> str:
         "both":   "inject on both UserPromptSubmit and PostToolUse",
     }
     return f"Current hook mode: '{mode}' — {descriptions.get(mode, '')}"
+
+
+# ---------------------------------------------------------------------------
+# Unattended sub-agents
+# ---------------------------------------------------------------------------
+
+_AGENTS_DIR: Path = Path.home() / ".ai-mesh" / "agents"
+# job_id -> {name, prompt, started, proc, out_path, err_path, cwd}
+# In-memory only; cleared on MCP client restart. Output files persist on disk.
+_agents: dict[str, dict] = {}
+
+
+def _find_claude_cli() -> Optional[str]:
+    """Locate the Claude Code CLI binary."""
+    return shutil.which("claude") or shutil.which("claude.cmd") or shutil.which("claude.exe")
+
+
+@mcp.tool()
+async def spawn_agent(prompt: str, name: str = "agent", cwd: str = "") -> str:
+    """
+    Spin off an unattended Claude Code agent in the background. Returns a
+    job_id immediately so the main session can keep working; check progress
+    with list_agents() and pull the transcript with get_agent_result(job_id)
+    when ready.
+
+    The sub-agent runs `claude -p <prompt>` in print/non-interactive mode.
+    It uses the same Anthropic auth as the calling user.
+
+    Args:
+        prompt: The task for the sub-agent (full instructions).
+        name: Short label shown in list_agents() (display only).
+        cwd: Working directory for the sub-agent (defaults to current).
+    """
+    if not prompt.strip():
+        return "Provide a non-empty prompt."
+    claude_bin = _find_claude_cli()
+    if not claude_bin:
+        return "Error: 'claude' CLI not found in PATH. Install Claude Code first."
+
+    job_id = uuid.uuid4().hex[:8]
+    job_dir = _AGENTS_DIR / job_id
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        out_path = job_dir / "stdout.log"
+        err_path = job_dir / "stderr.log"
+        prompt_path = job_dir / "prompt.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        out_fp = open(out_path, "wb")
+        err_fp = open(err_path, "wb")
+    except Exception as e:
+        return f"Failed to prepare agent workspace: {e}"
+
+    work_cwd = cwd or str(Path.cwd())
+    try:
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NO_WINDOW | 0x00000008  # DETACHED_PROCESS
+            proc = subprocess.Popen(
+                [claude_bin, "-p", prompt],
+                stdout=out_fp,
+                stderr=err_fp,
+                stdin=subprocess.DEVNULL,
+                cwd=work_cwd,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        else:
+            proc = subprocess.Popen(
+                [claude_bin, "-p", prompt],
+                stdout=out_fp,
+                stderr=err_fp,
+                stdin=subprocess.DEVNULL,
+                cwd=work_cwd,
+                start_new_session=True,
+            )
+    except Exception as e:
+        return f"Failed to spawn agent: {e}"
+
+    _agents[job_id] = {
+        "name":     name,
+        "prompt":   prompt,
+        "started":  time.time(),
+        "proc":     proc,
+        "out_path": str(out_path),
+        "err_path": str(err_path),
+        "cwd":      work_cwd,
+    }
+    return (
+        f"Agent '{name}' spawned (job_id={job_id}, PID={proc.pid}).\n"
+        f"  list_agents() to check status.\n"
+        f"  get_agent_result('{job_id}') to retrieve output.\n"
+        f"  kill_agent('{job_id}') to stop it."
+    )
+
+
+@mcp.tool()
+async def list_agents() -> str:
+    """
+    List all sub-agents spawned this MCP session, with status and elapsed time.
+    """
+    if not _agents:
+        return "No agents spawned this session."
+    lines = []
+    for jid, info in _agents.items():
+        rc = info["proc"].poll()
+        status = "🟢 running" if rc is None else f"⚫ done (exit {rc})"
+        elapsed = int(time.time() - info["started"])
+        snippet = info["prompt"].replace("\n", " ")[:60]
+        lines.append(f"[{jid}] {info['name']} — {status}, {elapsed}s  »  {snippet}…")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_agent_result(job_id: str, tail_lines: int = 0) -> str:
+    """
+    Fetch a sub-agent's transcript (stdout + stderr) plus exit status.
+
+    Args:
+        job_id: ID returned by spawn_agent().
+        tail_lines: If >0, return only the last N lines of stdout (handy for
+                    long-running agents). Default 0 = full output.
+    """
+    info = _agents.get(job_id)
+    if not info:
+        return f"No agent with job_id '{job_id}'. (Spawned agents are lost on MCP restart.)"
+    rc = info["proc"].poll()
+    status = "running" if rc is None else f"done (exit {rc})"
+    try:
+        out = Path(info["out_path"]).read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        out = f"(could not read stdout: {e})"
+    if tail_lines > 0 and out:
+        out = "\n".join(out.splitlines()[-tail_lines:])
+    try:
+        err = Path(info["err_path"]).read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        err = ""
+    parts = [
+        f"Agent: {info['name']}  (job_id={job_id}, status={status})",
+        f"Started: {time.strftime('%H:%M:%S', time.localtime(info['started']))}",
+        f"Prompt: {info['prompt'][:200]}{'…' if len(info['prompt']) > 200 else ''}",
+        "",
+        "── Output ──",
+        out if out else "(empty)",
+    ]
+    if err:
+        parts += ["", "── Stderr ──", err]
+    return "\n".join(parts)
+
+
+@mcp.tool()
+async def kill_agent(job_id: str) -> str:
+    """
+    Terminate a running sub-agent. No-op if already finished.
+
+    Args:
+        job_id: ID returned by spawn_agent().
+    """
+    info = _agents.get(job_id)
+    if not info:
+        return f"No agent with job_id '{job_id}'."
+    proc = info["proc"]
+    if proc.poll() is not None:
+        return f"Agent {job_id} already finished (exit {proc.returncode})."
+    try:
+        proc.terminate()
+        time.sleep(0.5)
+        if proc.poll() is None:
+            proc.kill()
+        return f"Agent {job_id} terminated."
+    except Exception as e:
+        return f"Failed to terminate: {e}"
 
 
 # ---------------------------------------------------------------------------
