@@ -646,7 +646,7 @@ def open_config(_icon=None, _item=None):
     local_txt = scrolledtext.ScrolledText(
         local_frame, bg="#161b22", fg="#8b949e",
         font=("Consolas", 9), relief="flat", wrap="word",
-        highlightthickness=0, padx=8, pady=6, height=10,
+        highlightthickness=0, padx=8, pady=6, height=14,
         state="disabled",
     )
     local_txt.pack(fill="x")
@@ -679,14 +679,12 @@ def open_config(_icon=None, _item=None):
                 else:
                     status_dot = "·"
                     status_txt = "no credentials"
+                # Compact form: 3 lines/slot fits ~4 slots without scrolling
                 local_txt.insert(
                     END,
                     f"{status_dot} [{iid}] {name}  ({status_txt}){marker}\n"
-                    f"  cwd:       {cwd}\n"
-                    f"  server:    {server}\n"
-                    f"  type:      {itype}\n"
-                    f"  api_key:   {key_disp}\n"
-                    f"  hook_mode: {hookm}\n\n",
+                    f"   {cwd}\n"
+                    f"   {key_disp} · {itype} · hook={hookm} · {server}\n\n",
                 )
 
         local_txt.config(state="disabled")
