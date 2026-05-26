@@ -332,6 +332,28 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> di
     return key_row
 
 
+def _resolve_caller_instance(x_api_key: Optional[str], x_instance_id: Optional[str]) -> tuple[dict, dict]:
+    """Authenticate via api_key + identify which instance the caller is.
+
+    Raises HTTPException on bad key, missing/unknown instance_id, or
+    mismatched ownership. Returns (key_row, instance_row).
+    """
+    key_row = _resolve_api_key(x_api_key)
+    if not key_row:
+        raise HTTPException(401, "Valid X-API-Key required")
+    if not x_instance_id:
+        raise HTTPException(400, "X-Instance-Id header required (call /api/register first)")
+    with db() as conn:
+        inst = conn.execute(
+            "SELECT * FROM instances WHERE id = ?", (x_instance_id,)
+        ).fetchone()
+    if not inst:
+        raise HTTPException(404, "Instance not found")
+    if inst["owner_id"] != key_row["owner_id"]:
+        raise HTTPException(403, "Instance is owned by a different user")
+    return key_row, dict(inst)
+
+
 def _user_can_see_instance(user: dict, inst: dict) -> bool:
     """A user can see their own instances, any public instance, or all if admin."""
     if user.get("is_admin"):
@@ -622,10 +644,12 @@ async def register(
 
 
 @app.post("/api/heartbeat")
-async def heartbeat(request: Request, x_api_key: Optional[str] = Header(default=None)):
-    key_row = _resolve_api_key(x_api_key)
-    if not key_row:
-        raise HTTPException(401, "Valid X-API-Key required")
+async def heartbeat(
+    request: Request,
+    x_api_key: Optional[str]    = Header(default=None),
+    x_instance_id: Optional[str] = Header(default=None),
+):
+    _, inst = _resolve_caller_instance(x_api_key, x_instance_id)
     # Optional body: {"hook_mode": "off|prompt|tool|both"}
     body: dict = {}
     try:
@@ -635,33 +659,21 @@ async def heartbeat(request: Request, x_api_key: Optional[str] = Header(default=
     now = time.time()
     with db() as conn:
         conn.execute(
-            "UPDATE instances SET last_seen = ?, connected = 1 WHERE owner_id = ?",
-            (now, key_row["owner_id"]),
+            "UPDATE instances SET last_seen = ?, connected = 1 WHERE id = ?",
+            (now, inst["id"]),
         )
-        # Stash hook_mode in memory keyed by all instances under this owner
-        if "hook_mode" in body and body["hook_mode"] in ("off", "prompt", "tool", "both"):
-            rows = conn.execute(
-                "SELECT id FROM instances WHERE owner_id = ?", (key_row["owner_id"],)
-            ).fetchall()
-            for r in rows:
-                _instance_runtime.setdefault(r["id"], {})["hook_mode"] = body["hook_mode"]
+    if body.get("hook_mode") in ("off", "prompt", "tool", "both"):
+        _instance_runtime.setdefault(inst["id"], {})["hook_mode"] = body["hook_mode"]
     return {"ok": True}
 
 
 @app.post("/api/messages")
-async def send_message(req: SendMessageRequest, x_api_key: Optional[str] = Header(default=None)):
-    key_row = _resolve_api_key(x_api_key)
-    if not key_row:
-        raise HTTPException(401, "Valid X-API-Key required")
-
-    # Find this key's instance
-    with db() as conn:
-        inst = conn.execute(
-            "SELECT * FROM instances WHERE owner_id = ? AND connected = 1 ORDER BY last_seen DESC",
-            (key_row["owner_id"],),
-        ).fetchone()
-    if not inst:
-        raise HTTPException(404, "No connected instance found for this API key")
+async def send_message(
+    req: SendMessageRequest,
+    x_api_key: Optional[str]    = Header(default=None),
+    x_instance_id: Optional[str] = Header(default=None),
+):
+    key_row, inst = _resolve_caller_instance(x_api_key, x_instance_id)
 
     # If DMing, verify the sender is allowed to message the target
     if req.to_id:
@@ -709,19 +721,12 @@ async def send_message(req: SendMessageRequest, x_api_key: Optional[str] = Heade
 
 
 @app.get("/api/messages")
-async def get_messages(limit: int = 50, x_api_key: Optional[str] = Header(default=None)):
-    key_row = _resolve_api_key(x_api_key)
-    if not key_row:
-        raise HTTPException(401, "Valid X-API-Key required")
-
-    with db() as conn:
-        inst = conn.execute(
-            "SELECT * FROM instances WHERE owner_id = ? ORDER BY last_seen DESC",
-            (key_row["owner_id"],),
-        ).fetchone()
-    if not inst:
-        return []
-
+async def get_messages(
+    limit: int = 50,
+    x_api_key: Optional[str]    = Header(default=None),
+    x_instance_id: Optional[str] = Header(default=None),
+):
+    _, inst = _resolve_caller_instance(x_api_key, x_instance_id)
     iid = inst["id"]
     with db() as conn:
         rows = conn.execute(
@@ -787,19 +792,24 @@ async def update_instance(
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/instance")
-async def ws_instance(ws: WebSocket, api_key: str = ""):
+async def ws_instance(ws: WebSocket, api_key: str = "", instance_id: str = ""):
     key_row = _resolve_api_key(api_key)
     if not key_row:
         await ws.close(code=4001)
         return
+    if not instance_id:
+        await ws.close(code=4003)  # client must identify its instance
+        return
 
     with db() as conn:
         inst = conn.execute(
-            "SELECT * FROM instances WHERE owner_id = ? ORDER BY last_seen DESC",
-            (key_row["owner_id"],),
+            "SELECT * FROM instances WHERE id = ?", (instance_id,)
         ).fetchone()
     if not inst:
         await ws.close(code=4002)
+        return
+    if inst["owner_id"] != key_row["owner_id"]:
+        await ws.close(code=4004)  # instance/key mismatch
         return
 
     iid = inst["id"]

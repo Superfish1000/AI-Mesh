@@ -88,8 +88,14 @@ def _get_http() -> httpx.AsyncClient:
 
 
 def _headers() -> dict:
+    h: dict = {}
     api_key = _cfg.get("api_key", "")
-    return {"X-API-Key": api_key} if api_key else {}
+    if api_key:
+        h["X-API-Key"] = api_key
+    iid = _cfg.get("instance_id", "")
+    if iid:
+        h["X-Instance-Id"] = iid
+    return h
 
 
 def _system_info() -> dict:
@@ -138,8 +144,9 @@ def _write_incoming(msg: dict):
 async def _ws_listener():
     """Maintain a persistent WebSocket to receive push messages."""
     api_key = _cfg.get("api_key", "")
+    iid     = _cfg.get("instance_id", "")
     ws_base = SERVER_URL.replace("http://", "ws://").replace("https://", "wss://")
-    url = f"{ws_base}/ws/instance?api_key={api_key}"
+    url = f"{ws_base}/ws/instance?api_key={api_key}&instance_id={iid}"
     while True:
         try:
             async with websockets.connect(url) as ws:
