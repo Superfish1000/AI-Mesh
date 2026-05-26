@@ -13,6 +13,7 @@ tkinter is included with Python on all platforms.
 import json
 import os
 import platform
+import queue
 import socket
 import sys
 import threading
@@ -256,6 +257,16 @@ _config_win: Toplevel | None = None
 _inbox_win: Toplevel | None = None
 _root: Tk | None = None  # hidden Tk root
 
+# Tkinter requires every interpreter call (including .after) to happen on the
+# main thread. pystray callbacks fire on its own worker thread, so we queue
+# UI work here and drain it from the tk pump loop on the main thread.
+_ui_queue: "queue.Queue[callable]" = queue.Queue()
+
+
+def _on_main(func, *args, **kwargs):
+    """Schedule `func(*args, **kwargs)` to run on the tk main thread."""
+    _ui_queue.put(lambda: func(*args, **kwargs))
+
 
 def _tk_root() -> Tk:
     global _root
@@ -267,14 +278,13 @@ def _tk_root() -> Tk:
 
 
 def open_config(_icon=None, _item=None):
+    # pystray callbacks fire on its worker thread; bounce to main via queue.
+    if threading.current_thread() is not threading.main_thread():
+        _on_main(open_config)
+        return
+
     global _config_win
     root = _tk_root()
-
-    # pystray dispatches menu callbacks on its worker thread; tkinter requires
-    # widget creation on the main thread. Marshal there via root.after().
-    if threading.current_thread() is not threading.main_thread():
-        root.after(0, lambda: open_config(_icon, _item))
-        return
 
     if _config_win and _config_win.winfo_exists():
         _config_win.lift()
@@ -623,13 +633,13 @@ def open_config(_icon=None, _item=None):
 # ---------------------------------------------------------------------------
 
 def open_inbox(_icon=None, _item=None):
+    # Same queue-marshal as open_config.
+    if threading.current_thread() is not threading.main_thread():
+        _on_main(open_inbox)
+        return
+
     global _inbox_win
     root = _tk_root()
-
-    # Same thread-marshal pattern as open_config (see comment there).
-    if threading.current_thread() is not threading.main_thread():
-        root.after(0, lambda: open_inbox(_icon, _item))
-        return
 
     if _inbox_win and _inbox_win.winfo_exists():
         _inbox_win.lift()
@@ -803,11 +813,22 @@ def main():
     # On double-click / default action: open config
     # (already set via default=True on Configuration menu item)
 
-    # Pump tkinter events on main thread while pystray runs in its own thread
+    # Pump tkinter events on main thread; drain the UI queue so work scheduled
+    # from pystray's worker thread actually executes here.
     def _tk_pump():
         try:
             root = _tk_root()
             while True:
+                # Run any pending UI calls from background threads
+                try:
+                    while True:
+                        fn = _ui_queue.get_nowait()
+                        try:
+                            fn()
+                        except Exception as e:
+                            print(f"tray UI error: {e}", file=sys.stderr)
+                except queue.Empty:
+                    pass
                 root.update()
                 time.sleep(0.05)
         except Exception:
