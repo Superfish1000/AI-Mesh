@@ -596,6 +596,20 @@ async def list_api_keys(mesh_session: Optional[str] = Cookie(default=None)):
     return [dict(r) for r in rows]
 
 
+@app.post("/api/admin/api-keys/revoke-all")
+async def revoke_all_api_keys(mesh_session: Optional[str] = Cookie(default=None)):
+    user = _session_user(mesh_session)
+    if not user:
+        raise HTTPException(401, "Login required")
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE api_keys SET revoked = 1 WHERE owner_id = ? AND revoked = 0",
+            (user["id"],),
+        )
+        count = cur.rowcount
+    return {"ok": True, "revoked": count}
+
+
 @app.delete("/api/admin/api-keys/{key_id}")
 async def revoke_api_key(key_id: str, mesh_session: Optional[str] = Cookie(default=None)):
     user = _session_user(mesh_session)
@@ -1750,6 +1764,7 @@ function openKeysModal() {
         <div class="admin-row" style="margin-top:14px">
           <input id="keysModalLabel" class="field" placeholder="Label (e.g. laptop-claude-code)" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:5px;padding:6px 9px;font-size:12px">
           <button class="save-btn" onclick="genKeyModal()">Generate Key</button>
+          <button class="danger-btn" style="padding:6px 10px" onclick="revokeAllKeys()">Revoke All</button>
         </div>
         <div id="keysModalNew" style="display:none;margin-top:10px;background:#010409;border:1px solid #3fb950;padding:10px;border-radius:5px;font-family:Consolas;font-size:12px;color:#3fb950;word-break:break-all"></div>
       </div>
@@ -1804,6 +1819,19 @@ async function revokeKeyModal(id) {
   if (!confirm('Revoke this API key? Any instance using it will lose access.')) return;
   await fetch(`/api/admin/api-keys/${id}`, {method:'DELETE'});
   loadKeysModal();
+}
+
+async function revokeAllKeys() {
+  if (!confirm('Revoke ALL of your API keys? Every instance using one of them will lose access — you will need to generate a new key and reconnect.')) return;
+  const r = await fetch('/api/admin/api-keys/revoke-all', {method:'POST'});
+  if (r.ok) {
+    const data = await r.json();
+    alert(`Revoked ${data.revoked} key(s).`);
+    loadKeysModal();
+  } else {
+    const err = await r.json().catch(() => ({}));
+    alert(formatErr(err));
+  }
 }
 
 // ── Users modal (admin only) ───────────────────────────────────────────────────
