@@ -371,7 +371,8 @@ def open_config(_icon=None, _item=None):
     win = Toplevel(root)
     _config_win = win
     win.title("AI Mesh — Configuration")
-    win.resizable(False, False)
+    win.resizable(True, True)
+    win.minsize(420, 600)
     win.configure(bg="#0d1117")
 
     pad = {"padx": 12, "pady": 6}
@@ -640,49 +641,56 @@ def open_config(_icon=None, _item=None):
           font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=16, pady=(4, 2))
 
     local_frame = Frame(win, bg="#161b22", bd=0, relief="flat")
-    local_frame.pack(fill="x", padx=16, pady=(0, 4))
+    local_frame.pack(fill="both", expand=True, padx=16, pady=(0, 4))
 
-    local_lbl = Label(local_frame, text="", bg="#161b22", fg="#8b949e",
-                      font=("Consolas", 9), justify="left", anchor="w",
-                      wraplength=340, padx=8, pady=6)
-    local_lbl.pack(fill="x")
+    local_txt = scrolledtext.ScrolledText(
+        local_frame, bg="#161b22", fg="#8b949e",
+        font=("Consolas", 9), relief="flat", wrap="word",
+        highlightthickness=0, padx=8, pady=6, height=12,
+        state="disabled",
+    )
+    local_txt.pack(fill="both", expand=True)
 
     def refresh_local():
         all_cfg = _read_all_cfg()
         with state._lock:
             slots = dict(state.per_slot)
+
+        local_txt.config(state="normal")
+        local_txt.delete("1.0", END)
+
         if not all_cfg:
-            local_lbl.config(text="None.")
-            return
-        lines = []
-        for cwd, cfg in all_cfg.items():
-            iid    = cfg.get("instance_id", "(unregistered)")
-            name   = cfg.get("name", "(no name)")
-            itype  = cfg.get("instance_type", "claude-code")
-            server = cfg.get("server_url", "(default)")
-            apikey = cfg.get("api_key", "")
-            hookm  = cfg.get("hook_mode", "off")
-            marker = "  ◀ this session" if cwd == _CWD_KEY else ""
-            short_cwd = cwd if len(cwd) <= 56 else "…" + cwd[-54:]
-            key_disp  = (apikey[:13] + "…") if apikey else "(none)"
-            slot_info = slots.get(cwd, {})
-            if cwd in slots:
-                status_dot = "●" if slot_info.get("connected") else "○"
-                status_txt = "online" if slot_info.get("connected") else "offline"
-            else:
-                status_dot = "·"
-                status_txt = "no credentials"
-            lines.append(
-                f"{status_dot} [{iid}] {name}  ({status_txt}){marker}\n"
-                f"  cwd:       {short_cwd}\n"
-                f"  server:    {server}\n"
-                f"  type:      {itype}\n"
-                f"  api_key:   {key_disp}\n"
-                f"  hook_mode: {hookm}"
-            )
-        local_lbl.config(text="\n\n".join(lines))
-        # Re-refresh every 5s while the config window is open so live status
-        # reflects the latest poll-loop iteration without manual reopen.
+            local_txt.insert(END, "None.")
+        else:
+            header = f"{len(all_cfg)} slot(s) in ~/.ai-mesh/config.json\n\n"
+            local_txt.insert(END, header)
+            for cwd, cfg in all_cfg.items():
+                iid    = cfg.get("instance_id", "(unregistered)")
+                name   = cfg.get("name", "(no name)")
+                itype  = cfg.get("instance_type", "claude-code")
+                server = cfg.get("server_url", "(default)")
+                apikey = cfg.get("api_key", "")
+                hookm  = cfg.get("hook_mode", "off")
+                marker = "  ◀ this session" if cwd == _CWD_KEY else ""
+                key_disp  = (apikey[:13] + "…") if apikey else "(none)"
+                if cwd in slots:
+                    status_dot = "●" if slots[cwd].get("connected") else "○"
+                    status_txt = "online" if slots[cwd].get("connected") else "offline"
+                else:
+                    status_dot = "·"
+                    status_txt = "no credentials"
+                local_txt.insert(
+                    END,
+                    f"{status_dot} [{iid}] {name}  ({status_txt}){marker}\n"
+                    f"  cwd:       {cwd}\n"
+                    f"  server:    {server}\n"
+                    f"  type:      {itype}\n"
+                    f"  api_key:   {key_disp}\n"
+                    f"  hook_mode: {hookm}\n\n",
+                )
+
+        local_txt.config(state="disabled")
+        # Re-refresh every 5s while the config window is open.
         try:
             win.after(5000, refresh_local)
         except Exception:
