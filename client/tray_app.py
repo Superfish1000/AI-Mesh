@@ -245,6 +245,12 @@ def open_config(_icon=None, _item=None):
     global _config_win
     root = _tk_root()
 
+    # pystray dispatches menu callbacks on its worker thread; tkinter requires
+    # widget creation on the main thread. Marshal there via root.after().
+    if threading.current_thread() is not threading.main_thread():
+        root.after(0, lambda: open_config(_icon, _item))
+        return
+
     if _config_win and _config_win.winfo_exists():
         _config_win.lift()
         _config_win.focus_force()
@@ -582,6 +588,11 @@ def open_config(_icon=None, _item=None):
 def open_inbox(_icon=None, _item=None):
     global _inbox_win
     root = _tk_root()
+
+    # Same thread-marshal pattern as open_config (see comment there).
+    if threading.current_thread() is not threading.main_thread():
+        root.after(0, lambda: open_inbox(_icon, _item))
+        return
 
     if _inbox_win and _inbox_win.winfo_exists():
         _inbox_win.lift()
