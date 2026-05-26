@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# SQLite runtime
+*.db
+*.db-shm
+*.db-wal
+
+# TLS / secrets
+cert.pem
+key.pem
+jwt_secret.txt
+certs/
+
+# OS
+.DS_Store
+Thumbs.db
