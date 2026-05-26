@@ -793,6 +793,35 @@ async def update_instance(
     return {"ok": True}
 
 
+@app.delete("/api/instances/{instance_id}")
+async def delete_instance(
+    instance_id: str,
+    mesh_session: Optional[str] = Cookie(default=None),
+):
+    user = _session_user(mesh_session)
+    if not user:
+        raise HTTPException(401, "Login required")
+    if instance_id == "admin":
+        raise HTTPException(400, "Cannot delete the admin GUI pseudo-instance")
+
+    with db() as conn:
+        inst = conn.execute(
+            "SELECT id, owner_id FROM instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+    if not inst:
+        raise HTTPException(404, "Instance not found")
+    if inst["owner_id"] != user["id"] and not user["is_admin"]:
+        raise HTTPException(403, "Only the owner or an admin can delete an instance")
+
+    # Drop any live WS for the instance, then remove its DB row and runtime state
+    instances_ws.disconnect(instance_id)
+    _instance_runtime.pop(instance_id, None)
+    with db() as conn:
+        conn.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
+    await admins_ws.broadcast({"type": "instance_deleted", "id": instance_id})
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Instance WebSocket
 # ---------------------------------------------------------------------------
@@ -1369,7 +1398,7 @@ function connectWS() {
   };
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
-    if (['instance_connected','instance_disconnected','instance_updated'].includes(ev.type)) {
+    if (['instance_connected','instance_disconnected','instance_updated','instance_deleted'].includes(ev.type)) {
       loadInstances();
     }
     if (ev.type === 'message') {
@@ -1515,6 +1544,12 @@ async function loadDetail(id) {
         </div>
         <div id="newKey" style="display:none;margin-top:8px;background:#010409;border:1px solid #3fb950;padding:8px;border-radius:5px;font-family:Consolas;font-size:12px;color:#3fb950;word-break:break-all"></div>
       </div>` : ''}
+      ${(isOwner || isAdmin) ? `
+      <div class="detail-item" style="grid-column:1/-1;border-top:1px solid #21262d;padding-top:10px">
+        <label style="color:#f85149">Danger zone</label>
+        <button class="danger-btn" style="padding:6px 12px;font-size:12px" onclick="deleteInstance('${inst.id}','${esc(displayName)}')">🗑 Delete Instance</button>
+        <div style="color:#8b949e;font-size:11px;margin-top:4px">Removes the row from the server. Stale/disconnected duplicates are safe to delete.</div>
+      </div>` : ''}
     </div>
     <div class="messages" id="msgList">${renderMessages(data.messages, id)}</div>
     <div class="send-bar">
@@ -1616,6 +1651,26 @@ async function saveOverride(id) {
 async function saveNotes(id) {
   const val = document.getElementById('notesArea')?.value;
   await fetch(`/api/instances/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({notes:val})});
+}
+
+async function deleteInstance(id, displayName) {
+  if (!confirm(`Delete instance '${displayName}' (${id})? This removes the row from the server. The instance's process (if any) can re-register itself.`)) return;
+  const r = await fetch(`/api/instances/${id}`, {method:'DELETE'});
+  if (r.ok) {
+    if (S.selected === id) {
+      S.selected = null;
+      document.getElementById('panel').innerHTML = `
+        <div class="welcome">
+          <h3>AI Mesh Coordination Server</h3>
+          <p>Instance deleted. Select another from the sidebar.</p>
+        </div>`;
+      history.replaceState({}, '', '/');
+    }
+    loadInstances();
+  } else {
+    const err = await r.json().catch(() => ({}));
+    alert(formatErr(err));
+  }
 }
 
 async function saveHookMode(id) {
