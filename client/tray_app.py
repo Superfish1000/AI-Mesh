@@ -214,8 +214,17 @@ def _patch(path: str, body: dict) -> bool:
 
 def _poll_loop(tray_icon: pystray.Icon):
     """Heartbeat + inbox poll every 15 s; updates tray icon colour."""
+    global _CWD_KEY
     while True:
-        if state.api_key:
+        # Re-resolve which cwd slot to bind to and reload from disk every
+        # iteration — the MCP client may have rotated keys / re-registered
+        # the instance under a different ID while the tray was running.
+        new_cwd = _pick_active_cwd()
+        if new_cwd != _CWD_KEY:
+            _CWD_KEY = new_cwd
+        state.cfg = load_cfg(_CWD_KEY)
+
+        if state.api_key and state.instance_id:
             result = _post("/api/heartbeat", {})
             was = state.connected
             state.connected = result is not None
