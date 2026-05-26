@@ -68,6 +68,10 @@ Three pieces:
 
 ## Setup
 
+> **Tip:** for a turnkey install on a server, use the scripts in
+> [`scripts/`](scripts/README.md) — one command sets up a venv, TLS, and
+> a systemd unit (Linux) or Scheduled Task (Windows).
+
 ### Prerequisites
 - Python 3.11+ (3.13 / 3.14 tested on Windows)
 - A free TCP port on the server host (default `8081`)

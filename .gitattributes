@@ -1,0 +1,7 @@
+* text=auto
+
+# Always LF (shell scripts run on Linux)
+*.sh text eol=lf
+
+# Always CRLF (PowerShell on Windows)
+*.ps1 text eol=crlf
