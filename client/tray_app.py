@@ -39,8 +39,14 @@ CONFIG_FILE = Path.home() / ".ai-mesh" / "config.json"
 SERVER_URL_DEFAULT = "http://localhost:8000"
 
 def _project_dir() -> str:
-    """Match mcp_client._project_dir(): detect the user's project directory
-    from Claude env vars first, falling back to cwd."""
+    """Match mcp_client._project_dir(): identity key, preferring explicit
+    tags and Claude session ID over project dir over cwd."""
+    explicit = os.environ.get("AI_MESH_INSTANCE_KEY")
+    if explicit:
+        return f"project:{explicit.strip()}"
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session_id:
+        return f"session:{session_id.strip()}"
     for var in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR", "INIT_CWD", "PWD"):
         v = os.environ.get(var)
         if v:

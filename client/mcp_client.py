@@ -42,20 +42,28 @@ CONFIG_FILE: Path = Path.home() / ".ai-mesh" / "config.json"
 INCOMING_FILE: Path = Path.home() / ".ai-mesh" / "incoming.json"
 
 def _project_dir() -> str:
-    """Best-effort detection of the user's project directory.
+    """Best-effort detection of this MCP child's identity key.
 
     Claude Code Desktop spawns MCP children with a generic cwd, so cwd
     alone can't distinguish sessions. Priority order:
       1. AI_MESH_INSTANCE_KEY — explicit per-project tag in settings.json env
-      2. CLAUDE_PROJECT_DIR / CLAUDE_WORKING_DIR — if Claude exposes them
-      3. INIT_CWD / PWD — shell hand-offs
-      4. Path.cwd() — last resort
+                                (most stable; survives Claude restarts)
+      2. CLAUDE_CODE_SESSION_ID — per-Claude-session identity
+                                (auto-distinguishes parallel sessions;
+                                 NB: changes on each Claude restart, so
+                                 instance rows become stale)
+      3. CLAUDE_PROJECT_DIR / CLAUDE_WORKING_DIR — project-dir fallback
+      4. INIT_CWD / PWD — shell hand-offs
+      5. Path.cwd() — last resort
 
     Users can also call set_project_id() at runtime to override per session.
     """
     explicit = os.environ.get("AI_MESH_INSTANCE_KEY")
     if explicit:
         return f"project:{explicit.strip()}"
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session_id:
+        return f"session:{session_id.strip()}"
     for var in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR", "INIT_CWD", "PWD"):
         v = os.environ.get(var)
         if v:
@@ -139,6 +147,9 @@ def _system_info() -> dict:
     }
     if pid_tag:
         info["project_id"] = pid_tag
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid:
+        info["claude_session_id"] = sid
     return info
 
 
