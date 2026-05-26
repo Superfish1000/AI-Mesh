@@ -39,10 +39,26 @@ SERVER_URL: str = os.environ.get("AI_MESH_URL", "http://localhost:8000").rstrip(
 CONFIG_FILE: Path = Path.home() / ".ai-mesh" / "config.json"
 INCOMING_FILE: Path = Path.home() / ".ai-mesh" / "incoming.json"
 
+def _project_dir() -> str:
+    """Best-effort detection of the user's project directory.
+
+    Claude Code Desktop spawns MCP children with a generic cwd (often the
+    app install dir or the user's home), so Path.cwd() is the same value
+    for every session — it can't be used as a per-session identity key.
+    Prefer env vars Claude exposes about the active project; fall back to
+    cwd only as a last resort.
+    """
+    for var in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR", "INIT_CWD", "PWD"):
+        v = os.environ.get(var)
+        if v:
+            return str(Path(v).resolve())
+    return str(Path.cwd().resolve())
+
+
 # Key used to isolate this instance's config from others on the same machine.
-# Uses cwd so each project directory gets its own identity. Two Claude Code
-# sessions in the same directory share an identity (intentional — same project).
-_CWD_KEY: str = str(Path.cwd())
+# Uses the detected project dir so each project gets its own identity. Two
+# Claude Code sessions in the same project share an identity (intentional).
+_CWD_KEY: str = _project_dir()
 
 mcp = FastMCP("AI Mesh")
 
@@ -107,7 +123,8 @@ def _system_info() -> dict:
         "platform_version": platform.version(),
         "python": platform.python_version(),
         "user": os.environ.get("USERNAME") or os.environ.get("USER", "unknown"),
-        "cwd": str(Path.cwd()),
+        "cwd": _project_dir(),
+        "process_cwd": str(Path.cwd()),
         "pid": os.getpid(),
     }
 

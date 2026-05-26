@@ -38,11 +38,21 @@ from PIL import Image, ImageDraw
 CONFIG_FILE = Path.home() / ".ai-mesh" / "config.json"
 SERVER_URL_DEFAULT = "http://localhost:8000"
 
+def _project_dir() -> str:
+    """Match mcp_client._project_dir(): detect the user's project directory
+    from Claude env vars first, falling back to cwd."""
+    for var in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR", "INIT_CWD", "PWD"):
+        v = os.environ.get(var)
+        if v:
+            return str(Path(v).resolve())
+    return str(Path.cwd().resolve())
+
+
 # The tray app manages ALL cwd-keyed configs so operators can see and switch
 # between every registered instance on this machine. If the launch cwd has no
 # api_key, fall back to the first registered slot that does — so users don't
 # get "not configured" just because they launched the tray from a fresh shell.
-_CWD_KEY: str = str(Path.cwd())
+_CWD_KEY: str = _project_dir()
 
 
 def _pick_active_cwd() -> str:
