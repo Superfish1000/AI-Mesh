@@ -381,10 +381,12 @@ def _instance_messageable_by(sender_owner_id: str, target: dict, sender_is_admin
 class SendMessageRequest(BaseModel):
     content: str
     to_id: Optional[str] = None
+    as_agent: Optional[str] = None  # sub-agent persona tag for the sender
 
 class AdminMessageRequest(BaseModel):
     content: str
     to_id: Optional[str] = None
+    as_agent: Optional[str] = None
 
 class UpdateInstanceRequest(BaseModel):
     name: Optional[str]         = None
@@ -749,11 +751,14 @@ async def send_message(
             (msg_id, inst["id"], req.to_id, req.content, now),
         )
 
+    base_name = inst["display_name"] or inst["name"]
+    sender_name = f"{base_name} / {req.as_agent}" if req.as_agent else base_name
     event = {
         "type":      "message",
         "id":        msg_id,
         "from_id":   inst["id"],
-        "from_name": inst["display_name"] or inst["name"],
+        "from_name": sender_name,
+        "from_agent": req.as_agent,
         "to_id":     req.to_id,
         "content":   req.content,
         "timestamp": now,
@@ -1055,6 +1060,8 @@ async def admin_message(req: AdminMessageRequest, mesh_session: Optional[str] = 
     msg_id = uuid.uuid4().hex
     now    = time.time()
     sender = f"🖥 {user['username']}"
+    if req.as_agent:
+        sender = f"{sender} / {req.as_agent}"
 
     with db() as conn:
         conn.execute(
@@ -1067,13 +1074,14 @@ async def admin_message(req: AdminMessageRequest, mesh_session: Optional[str] = 
         )
 
     event = {
-        "type":      "message",
-        "id":        msg_id,
-        "from_id":   "admin",
-        "from_name": sender,
-        "to_id":     req.to_id,
-        "content":   req.content,
-        "timestamp": now,
+        "type":       "message",
+        "id":         msg_id,
+        "from_id":    "admin",
+        "from_name":  sender,
+        "from_agent": req.as_agent,
+        "to_id":      req.to_id,
+        "content":    req.content,
+        "timestamp":  now,
     }
     if req.to_id:
         await instances_ws.send(req.to_id, event)

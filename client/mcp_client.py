@@ -381,24 +381,31 @@ async def connect(name: str = "", instance_type: str = "claude-code") -> str:
 
 
 @mcp.tool()
-async def send_message(content: str, to_instance_id: str = "") -> str:
+async def send_message(content: str, to_instance_id: str = "", as_agent: str = "") -> str:
     """
     Send a message to another instance or broadcast to all.
 
     Args:
         content: The message text.
         to_instance_id: Target instance ID. Leave empty to broadcast to everyone.
+        as_agent: Optional sub-agent persona tag (e.g. 'Buyer Agent').
+                  Recipients see the sender as 'YourName / as_agent'.
+                  No new mesh instance is created — your main instance
+                  remains the only mesh participant.
     """
     if not _cfg.get("api_key"):
         return "Not connected. Call connect() first."
 
     http = _get_http()
-    payload = {"content": content, "to_id": to_instance_id or None}
+    payload: dict = {"content": content, "to_id": to_instance_id or None}
+    if as_agent:
+        payload["as_agent"] = as_agent
     r = await http.post("/api/messages", headers=_headers(), json=payload)
     r.raise_for_status()
 
     target = f"instance {to_instance_id}" if to_instance_id else "all instances (broadcast)"
-    return f"Message sent to {target}."
+    tag = f" as '{as_agent}'" if as_agent else ""
+    return f"Message sent to {target}{tag}."
 
 
 @mcp.tool()
@@ -418,10 +425,12 @@ async def check_inbox() -> str:
         ts = time.strftime("%H:%M:%S", time.localtime(m.get("timestamp", 0)))
         sender = m.get("from_name") or m.get("from_id", "?")
         fid = m.get("from_id", "?")
+        fagent = m.get("from_agent")
         to = m.get("to_id")
         target = f"→ {to}" if to else "(broadcast)"
-        lines.append(f"[{ts}] {sender} [from_id={fid}] {target}: {m.get('content','')}")
-    lines.append("\nTo reply, call send_message(content, to_instance_id=<from_id of the message you want to answer>).")
+        agent_tag = f" [agent={fagent}]" if fagent else ""
+        lines.append(f"[{ts}] {sender} [from_id={fid}]{agent_tag} {target}: {m.get('content','')}")
+    lines.append("\nTo reply, call send_message(content, to_instance_id=<from_id>). To reply as a sub-agent, also pass as_agent='YourAgentName'.")
 
     return "\n".join(lines)
 
