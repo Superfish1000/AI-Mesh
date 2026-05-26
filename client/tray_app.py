@@ -168,7 +168,12 @@ class MeshState:
         return self.cfg.get("name", "")
 
     def headers(self) -> dict:
-        return {"X-API-Key": self.api_key} if self.api_key else {}
+        h: dict = {}
+        if self.api_key:
+            h["X-API-Key"] = self.api_key
+        if self.instance_id:
+            h["X-Instance-Id"] = self.instance_id
+        return h
 
 
 state = MeshState()
@@ -450,18 +455,38 @@ def open_config(_icon=None, _item=None):
 
         def _connect():
             try:
-                r = httpx.post(
-                    f"{url}/api/register",
-                    headers={"X-API-Key": state.api_key},
-                    json={"name": name, "instance_type": inst_type, "system_info": system_info()},
-                    timeout=8,
-                )
-                r.raise_for_status()
-                data = r.json()
+                existing_iid = state.cfg.get("instance_id", "")
+                iid = None
+
+                # If we already have an instance_id, try heartbeat first — only
+                # fall back to /api/register (which creates a NEW row) if the
+                # existing instance is gone from the server.
+                if existing_iid:
+                    try:
+                        hb = httpx.post(
+                            f"{url}/api/heartbeat",
+                            headers={"X-API-Key": state.api_key, "X-Instance-Id": existing_iid},
+                            json={},
+                            timeout=8,
+                        )
+                        if hb.status_code == 200:
+                            iid = existing_iid
+                    except Exception:
+                        pass
+
+                if iid is None:
+                    r = httpx.post(
+                        f"{url}/api/register",
+                        headers={"X-API-Key": state.api_key},
+                        json={"name": name, "instance_type": inst_type, "system_info": system_info()},
+                        timeout=8,
+                    )
+                    r.raise_for_status()
+                    iid = r.json()["instance_id"]
 
                 new_cfg = {
                     **state.cfg,
-                    "instance_id": data["instance_id"],
+                    "instance_id": iid,
                     "name": name,
                     "instance_type": inst_type,
                     "server_url": url,
@@ -471,9 +496,9 @@ def open_config(_icon=None, _item=None):
                 state.connected = True
 
                 win.after(0, lambda: [
-                    set_msg(f"Connected! ID: {data['instance_id']}", "#3fb950"),
+                    set_msg(f"Connected! ID: {iid}", "#3fb950"),
                     status_lbl.config(
-                        text=f"● Connected  (ID: {data['instance_id']})",
+                        text=f"● Connected  (ID: {iid})",
                         fg="#3fb950"
                     ),
                     btn_connect.config(state="normal"),
