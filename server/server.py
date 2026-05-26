@@ -630,6 +630,40 @@ async def register(
     system_info   = body.get("system_info", {})
     now = time.time()
 
+    # Idempotency: if this owner already has an instance from the same
+    # (hostname, cwd), reuse its row instead of creating a duplicate.
+    # Lets clients freely wipe their local config, rotate keys, or delete the
+    # instance row without piling up stale duplicates on the server.
+    sys_host = (system_info or {}).get("hostname", "")
+    sys_cwd  = (system_info or {}).get("cwd", "")
+    existing_id: Optional[str] = None
+    if sys_host and sys_cwd:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT id, system_info FROM instances WHERE owner_id = ?",
+                (key_row["owner_id"],),
+            ).fetchall()
+        for r in rows:
+            try:
+                si = json.loads(r["system_info"] or "{}")
+            except Exception:
+                continue
+            if si.get("hostname") == sys_host and si.get("cwd") == sys_cwd:
+                existing_id = r["id"]
+                break
+
+    if existing_id:
+        with db() as conn:
+            conn.execute(
+                """UPDATE instances
+                   SET name = ?, instance_type = ?, system_info = ?,
+                       last_seen = ?, connected = 1
+                   WHERE id = ?""",
+                (name, instance_type, json.dumps(system_info), now, existing_id),
+            )
+        await admins_ws.broadcast({"type": "instance_connected", "id": existing_id})
+        return {"instance_id": existing_id}
+
     instance_id = uuid.uuid4().hex[:8]
     with db() as conn:
         conn.execute(
