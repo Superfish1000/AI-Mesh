@@ -665,6 +665,161 @@ async def list_instances() -> str:
 
 
 @mcp.tool()
+async def delete_instance(instance_id: str) -> str:
+    """
+    Delete an instance from the mesh server. You can only delete instances
+    you own (or, if you're an admin, any instance). The MCP client process
+    behind a deleted instance will need to re-register on its next connect().
+
+    Args:
+        instance_id: ID from list_instances() — e.g. '46a60808'.
+    """
+    if not _cfg.get("api_key"):
+        return "Not connected. Call connect() first."
+    if instance_id == "admin":
+        return "Cannot delete the admin pseudo-instance."
+
+    http = _get_http()
+    r = await http.delete(
+        f"/api/instances/{instance_id}",
+        headers=_headers(),
+    )
+    if r.status_code == 200:
+        return f"Deleted instance {instance_id}."
+    try:
+        msg = r.json().get("detail", r.text)
+    except Exception:
+        msg = r.text
+    return f"Delete failed ({r.status_code}): {msg}"
+
+
+@mcp.tool()
+async def cleanup_stale_instances(offline_only: bool = True, keep_self: bool = True, dry_run: bool = False) -> str:
+    """
+    Sweep your owned instances and delete the ones that look stale.
+
+    Args:
+        offline_only: If True (default), only delete instances whose
+            connected flag is 0. Set False to delete EVERY owned instance
+            (you'll still be excluded by keep_self).
+        keep_self: If True (default), spare this process's own instance_id
+            from deletion.
+        dry_run: If True, list what WOULD be deleted without doing it.
+    """
+    if not _cfg.get("api_key"):
+        return "Not connected. Call connect() first."
+
+    http = _get_http()
+    r = await http.get("/api/instances", headers=_headers())
+    if r.status_code != 200:
+        return f"Could not list instances: {r.status_code} {r.text}"
+    instances = r.json()
+
+    my_id = _cfg.get("instance_id", "")
+    # Owned instances are the ones visible under our api_key that aren't
+    # the admin pseudo-instance and aren't from another user's public set.
+    # The /api/instances endpoint already filters by visibility, so we
+    # further restrict to rows whose owner_id is ours when known. Without
+    # an explicit owner_id field on each row, we use hostname-matching as
+    # a heuristic: stale rows on OTHER hosts are not ours to clean.
+    sys_info = _system_info()
+    my_host  = sys_info.get("hostname", "")
+
+    candidates = []
+    for i in instances:
+        if i["id"] == "admin":
+            continue
+        if keep_self and i["id"] == my_id:
+            continue
+        if offline_only and i.get("connected"):
+            continue
+        si_raw = i.get("system_info") or "{}"
+        try:
+            si = json.loads(si_raw) if isinstance(si_raw, str) else si_raw
+        except Exception:
+            si = {}
+        # Only sweep rows that came from THIS machine (defensive)
+        if si.get("hostname") != my_host:
+            continue
+        candidates.append(i)
+
+    if not candidates:
+        return "Nothing to clean — no matching stale instances on this host."
+
+    lines = []
+    for i in candidates:
+        name = i.get("display_name") or i["name"]
+        marker = "🟢" if i.get("connected") else "⚫"
+        lines.append(f"  {marker} {name}  [{i['id']}]")
+
+    if dry_run:
+        return "Would delete:\n" + "\n".join(lines) + "\n\n(dry_run=True — pass dry_run=False to actually delete.)"
+
+    deleted, failed = [], []
+    for i in candidates:
+        rr = await http.delete(f"/api/instances/{i['id']}", headers=_headers())
+        (deleted if rr.status_code == 200 else failed).append(i["id"])
+
+    out = [f"Deleted {len(deleted)} instance(s)."]
+    if deleted:
+        out.append("Removed: " + ", ".join(deleted))
+    if failed:
+        out.append("Failed: " + ", ".join(failed))
+    return "\n".join(out)
+
+
+@mcp.tool()
+async def list_local_slots() -> str:
+    """
+    Show every config slot in ~/.ai-mesh/config.json on this machine,
+    with which one this process is currently bound to. Useful for spotting
+    stale slots created by older code or wiped registrations.
+    """
+    try:
+        all_cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    except Exception as e:
+        return f"Could not read {CONFIG_FILE}: {e}"
+    if not all_cfg:
+        return "No slots in config.json."
+    lines = [f"{len(all_cfg)} slot(s) in {CONFIG_FILE}:"]
+    for cwd, cfg in all_cfg.items():
+        marker  = "  ◀ this process" if cwd == _CWD_KEY else ""
+        iid     = cfg.get("instance_id", "(none)")
+        name    = cfg.get("name", "(no name)")
+        api_key = cfg.get("api_key", "")
+        key_disp = (api_key[:13] + "…") if api_key else "(none)"
+        lines.append(f"  [{iid}] {name}{marker}")
+        lines.append(f"    cwd:     {cwd}")
+        lines.append(f"    api_key: {key_disp}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def delete_local_slot(slot_key: str) -> str:
+    """
+    Remove a slot from this machine's ~/.ai-mesh/config.json. Use this to
+    clear stale local entries (e.g. older cwd-based slots that have been
+    superseded by 'root:' or 'project:' tagged ones). Does NOT delete the
+    server-side instance — use delete_instance() for that.
+
+    Args:
+        slot_key: The exact cwd / project: / root: key. Get them from
+                  list_local_slots().
+    """
+    if slot_key == _CWD_KEY:
+        return f"Refusing to delete the slot this process is using ({slot_key})."
+    try:
+        all_cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    except Exception as e:
+        return f"Could not read {CONFIG_FILE}: {e}"
+    if slot_key not in all_cfg:
+        return f"No such slot: {slot_key}"
+    all_cfg.pop(slot_key)
+    CONFIG_FILE.write_text(json.dumps(all_cfg, indent=2))
+    return f"Removed local slot '{slot_key}'."
+
+
+@mcp.tool()
 async def set_name(name: str) -> str:
     """
     Update this instance's display name on the mesh server.
