@@ -469,6 +469,44 @@ async def connect(name: str = "", instance_type: str = "claude-code", fresh: boo
         except Exception:
             pass
 
+    # Even without a saved instance_id, the server may already have an
+    # instance for us (e.g. config was wiped but the row persists). Look
+    # it up by (api_key owner, matching identity_key in system_info.cwd)
+    # before creating yet another duplicate. Honors fresh=True bypass.
+    if not fresh:
+        sys_info = _system_info()
+        try:
+            r = await http.get(
+                "/api/instances",
+                headers={"X-API-Key": _cfg.get("api_key", "")},
+            )
+            if r.status_code == 200:
+                wanted_cwd = sys_info.get("cwd")
+                wanted_host = sys_info.get("hostname")
+                for inst in r.json():
+                    si_raw = inst.get("system_info") or "{}"
+                    try:
+                        si = json.loads(si_raw) if isinstance(si_raw, str) else si_raw
+                    except Exception:
+                        continue
+                    if (si.get("cwd") == wanted_cwd
+                            and si.get("hostname") == wanted_host):
+                        # Adopt this existing instance.
+                        _cfg["instance_id"] = inst["id"]
+                        _cfg["name"] = inst.get("name") or _cfg.get("name", "")
+                        _save_cfg(_cfg)
+                        _connected = True
+                        asyncio.create_task(_heartbeat_loop())
+                        asyncio.create_task(_ws_listener())
+                        _ensure_tray_running()
+                        return (
+                            f"Adopted existing AI Mesh instance "
+                            f"'{_cfg['name']}' (ID: {inst['id']}) — local "
+                            f"config was missing the link."
+                        )
+        except Exception:
+            pass
+
     # Fresh registration
     if not name:
         name = f"{socket.gethostname()}-{os.getpid()}"
