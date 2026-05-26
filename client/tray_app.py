@@ -159,6 +159,8 @@ class MeshState:
         self.connected: bool = False
         self.instances: list[dict] = []
         self.inbox: list[dict] = []
+        # cwd_key -> {"connected": bool, "last_ok": float, "instance_id": str}
+        self.per_slot: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     @property
@@ -223,54 +225,98 @@ def _patch(path: str, body: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _poll_loop(tray_icon: pystray.Icon):
-    """Heartbeat + inbox poll every 15 s; updates tray icon colour."""
+    """Heartbeat every locally-registered instance every 15s; aggregate
+    status drives the icon colour. The 'active' slot (for the inbox view
+    and config panel context) is still picked via _pick_active_cwd()."""
     global _CWD_KEY
     while True:
-        # Re-resolve which cwd slot to bind to and reload from disk every
-        # iteration — the MCP client may have rotated keys / re-registered
-        # the instance under a different ID while the tray was running.
+        all_cfg = _read_all_cfg()
+
+        # Refresh the active-slot binding for the config panel & inbox tools
         new_cwd = _pick_active_cwd()
         if new_cwd != _CWD_KEY:
             _CWD_KEY = new_cwd
-        state.cfg = load_cfg(_CWD_KEY)
+        state.cfg = all_cfg.get(_CWD_KEY, {})
 
+        # Heartbeat every slot that has credentials
+        per_slot: dict[str, dict] = {}
+        total = 0
+        online = 0
+        for cwd, cfg in all_cfg.items():
+            api_key = cfg.get("api_key", "")
+            inst_id = cfg.get("instance_id", "")
+            server  = cfg.get("server_url") or SERVER_URL_DEFAULT
+            if not api_key or not inst_id:
+                continue
+            total += 1
+            try:
+                r = httpx.post(
+                    f"{server.rstrip('/')}/api/heartbeat",
+                    headers={"X-API-Key": api_key, "X-Instance-Id": inst_id},
+                    json={"hook_mode": cfg.get("hook_mode", "off")},
+                    timeout=5,
+                )
+                connected = (r.status_code == 200)
+            except Exception:
+                connected = False
+            if connected:
+                online += 1
+            per_slot[cwd] = {
+                "connected":   connected,
+                "last_ok":     time.time() if connected else 0,
+                "instance_id": inst_id,
+                "name":        cfg.get("name", inst_id),
+            }
+
+        with state._lock:
+            state.per_slot = per_slot
+            # Aggregate "connected" = any slot is up (for legacy callers)
+            state.connected = online > 0
+
+        # Icon: green if all online, amber if mixed, red if none up
+        if total == 0:
+            tray_icon.icon = ICON_DISCONNECTED
+        elif online == total:
+            tray_icon.icon = ICON_CONNECTED
+        elif online == 0:
+            tray_icon.icon = ICON_DISCONNECTED
+        else:
+            tray_icon.icon = ICON_CONNECTING  # amber = mixed
+        tray_icon.title = _tray_title()
+
+        # Inbox poll (uses the active slot only — most-recent inbound history)
         if state.api_key and state.instance_id:
-            result = _post("/api/heartbeat", {})
-            was = state.connected
-            state.connected = result is not None
-            if state.connected != was:
-                tray_icon.icon = ICON_CONNECTED if state.connected else ICON_DISCONNECTED
-                tray_icon.title = _tray_title()
-
-            # Refresh instance list
             data = _get("/api/instances")
             if data:
                 with state._lock:
                     state.instances = [i for i in data if i["id"] != "admin"]
-
-            # Poll inbox (new messages since last fetch)
             msgs = _get(f"/api/messages?limit=10")
             if msgs:
                 existing_ids = {m["id"] for m in state.inbox}
                 new = [m for m in msgs if m["id"] not in existing_ids]
                 if new:
                     state.inbox = (new + state.inbox)[:100]
-                    # Flash tray title briefly
                     tray_icon.title = f"AI Mesh — {len(new)} new message(s)"
-                    threading.Timer(4, lambda: setattr(tray_icon, "title", _tray_title())).start()
-        else:
-            state.connected = False
-            tray_icon.icon = ICON_DISCONNECTED
+                    threading.Timer(
+                        4, lambda: setattr(tray_icon, "title", _tray_title())
+                    ).start()
 
         time.sleep(15)
 
 
 def _tray_title() -> str:
-    if not state.api_key:
+    with state._lock:
+        slots = dict(state.per_slot)
+    total = len(slots)
+    if total == 0:
         return "AI Mesh — not configured"
-    if state.connected:
-        return f"AI Mesh — {state.name or state.instance_id} ● online"
-    return f"AI Mesh — {state.name or state.instance_id} ○ offline"
+    online = sum(1 for v in slots.values() if v.get("connected"))
+    if total == 1:
+        # Single-instance shorthand
+        only = next(iter(slots.values()))
+        dot = "●" if only.get("connected") else "○"
+        return f"AI Mesh — {only.get('name','?')} {dot} {'online' if only.get('connected') else 'offline'}"
+    return f"AI Mesh — {online}/{total} online"
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +642,8 @@ def open_config(_icon=None, _item=None):
 
     def refresh_local():
         all_cfg = _read_all_cfg()
+        with state._lock:
+            slots = dict(state.per_slot)
         if not all_cfg:
             local_lbl.config(text="None.")
             return
@@ -610,8 +658,15 @@ def open_config(_icon=None, _item=None):
             marker = "  ◀ this session" if cwd == _CWD_KEY else ""
             short_cwd = cwd if len(cwd) <= 56 else "…" + cwd[-54:]
             key_disp  = (apikey[:13] + "…") if apikey else "(none)"
+            slot_info = slots.get(cwd, {})
+            if cwd in slots:
+                status_dot = "●" if slot_info.get("connected") else "○"
+                status_txt = "online" if slot_info.get("connected") else "offline"
+            else:
+                status_dot = "·"
+                status_txt = "no credentials"
             lines.append(
-                f"[{iid}] {name}{marker}\n"
+                f"{status_dot} [{iid}] {name}  ({status_txt}){marker}\n"
                 f"  cwd:       {short_cwd}\n"
                 f"  server:    {server}\n"
                 f"  type:      {itype}\n"
@@ -619,6 +674,12 @@ def open_config(_icon=None, _item=None):
                 f"  hook_mode: {hookm}"
             )
         local_lbl.config(text="\n\n".join(lines))
+        # Re-refresh every 5s while the config window is open so live status
+        # reflects the latest poll-loop iteration without manual reopen.
+        try:
+            win.after(5000, refresh_local)
+        except Exception:
+            pass
 
     refresh_local()
 
