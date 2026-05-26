@@ -21,6 +21,8 @@ import json
 import os
 import platform
 import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -108,6 +110,68 @@ def _system_info() -> dict:
         "cwd": str(Path.cwd()),
         "pid": os.getpid(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Tray auto-launch
+# ---------------------------------------------------------------------------
+
+TRAY_PID_FILE: Path = Path.home() / ".ai-mesh" / "tray.pid"
+
+
+def _tray_alive() -> bool:
+    """Return True if the PID file points at a running process."""
+    if not TRAY_PID_FILE.exists():
+        return False
+    try:
+        pid = int(TRAY_PID_FILE.read_text().strip())
+    except (ValueError, OSError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False  # PID gone
+    except PermissionError:
+        return True   # exists but owned by another user — still "alive"
+    except OSError:
+        return False
+    return True
+
+
+def _ensure_tray_running() -> None:
+    """Spawn tray_app.py detached if it isn't already running. Never raises."""
+    if _cfg.get("auto_tray") is False:
+        return
+    if _tray_alive():
+        return
+    tray_path = Path(__file__).parent / "tray_app.py"
+    if not tray_path.exists():
+        return
+    try:
+        if sys.platform == "win32":
+            DETACHED_PROCESS  = 0x00000008
+            CREATE_NO_WINDOW  = 0x08000000
+            proc = subprocess.Popen(
+                [sys.executable, str(tray_path)],
+                creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc = subprocess.Popen(
+                [sys.executable, str(tray_path)],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        TRAY_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TRAY_PID_FILE.write_text(str(proc.pid))
+    except Exception:
+        # Never let tray-spawn failure break connect()
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +309,7 @@ async def connect(name: str = "", instance_type: str = "claude-code") -> str:
 
     asyncio.create_task(_heartbeat_loop())
     asyncio.create_task(_ws_listener())
+    _ensure_tray_running()
 
     return (
         f"Connected to AI Mesh as '{name}' "
@@ -454,6 +519,23 @@ async def set_hook_mode(mode: str) -> str:
     if mode == "off":
         return "Hook injection disabled. Messages still buffered in check_inbox()."
     return f"Hook mode set to '{mode}'. Incoming messages will be injected into your Claude Code session."
+
+
+@mcp.tool()
+async def set_auto_tray(enabled: bool) -> str:
+    """
+    Enable or disable automatic launch of the system-tray app on connect().
+    When enabled (default), connect() spawns tray_app.py if no tray is
+    running yet. When disabled, you launch the tray manually.
+
+    Args:
+        enabled: True to auto-launch, False to opt out.
+    """
+    global _cfg
+    _cfg = _load_cfg()
+    _cfg["auto_tray"] = bool(enabled)
+    _save_cfg(_cfg)
+    return f"Auto-tray {'enabled' if enabled else 'disabled'} for this cwd."
 
 
 @mcp.tool()
