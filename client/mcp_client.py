@@ -523,6 +523,39 @@ async def set_hook_mode(mode: str) -> str:
 
 
 @mcp.tool()
+async def launch_tray(force: bool = False) -> str:
+    """
+    Launch the AI Mesh system-tray app (tray_app.py) if it isn't already
+    running. The tray shows status, lets you toggle hook mode, view inbox,
+    and inspect all locally-registered instances.
+
+    Args:
+        force: If True, ignore the PID file and spawn a new tray process
+               anyway (useful if the previous tray crashed without cleaning up).
+    """
+    if force:
+        try:
+            TRAY_PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+    elif _tray_alive():
+        try:
+            pid = TRAY_PID_FILE.read_text().strip()
+        except Exception:
+            pid = "?"
+        return f"Tray already running (PID {pid}). Pass force=True to spawn another."
+
+    _ensure_tray_running()
+    if _tray_alive():
+        pid = TRAY_PID_FILE.read_text().strip()
+        return f"Tray launched (PID {pid}). Look in your system tray."
+    return (
+        "Failed to spawn tray. Check that tray_app.py exists next to "
+        "mcp_client.py and that pystray + Pillow are installed."
+    )
+
+
+@mcp.tool()
 async def set_auto_tray(enabled: bool) -> str:
     """
     Enable or disable automatic launch of the system-tray app on connect().
