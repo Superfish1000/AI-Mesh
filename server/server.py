@@ -1239,6 +1239,7 @@ input.field{flex:1}textarea.field{width:100%;resize:vertical;min-height:54px}
   <span class="sub">Coordination Server</span>
   <div class="header-right">
     <span class="user-badge" id="userBadge"></span>
+    <button class="users-btn" onclick="openKeysModal()">🔑 API Keys</button>
     <button id="usersBtn" class="users-btn" style="display:none" onclick="openUsersModal()">👥 Users</button>
     <a href="/download/mcp-client" class="dl-btn">⬇ MCP Client</a>
     <form method="post" action="/auth/logout" style="display:inline">
@@ -1535,6 +1536,82 @@ async function saveVisibility(id) {
   });
   if (r.ok) { loadInstances(); loadDetail(id); }
   else alert('Failed to update visibility');
+}
+
+// ── API Keys modal (any logged-in user manages their own keys) ───────────────
+function openKeysModal() {
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.id = 'keysModal';
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-head">
+        <h2>🔑 My API Keys</h2>
+        <button class="modal-close" onclick="closeKeysModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:#8b949e;font-size:12px;margin-bottom:10px">
+          API keys authenticate the MCP client. Generate one per machine/session,
+          paste into <code>set_api_key()</code> in Claude Code or Claude Desktop.
+        </p>
+        <div id="keysModalList"><em style="color:#6e7681">Loading…</em></div>
+        <div class="admin-row" style="margin-top:14px">
+          <input id="keysModalLabel" class="field" placeholder="Label (e.g. laptop-claude-code)" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:5px;padding:6px 9px;font-size:12px">
+          <button class="save-btn" onclick="genKeyModal()">Generate Key</button>
+        </div>
+        <div id="keysModalNew" style="display:none;margin-top:10px;background:#010409;border:1px solid #3fb950;padding:10px;border-radius:5px;font-family:Consolas;font-size:12px;color:#3fb950;word-break:break-all"></div>
+      </div>
+    </div>`;
+  modal.onclick = e => { if (e.target === modal) closeKeysModal(); };
+  document.body.appendChild(modal);
+  loadKeysModal();
+}
+
+function closeKeysModal() {
+  document.getElementById('keysModal')?.remove();
+}
+
+async function loadKeysModal() {
+  const r = await fetch('/api/admin/api-keys');
+  const keys = await r.json();
+  const el = document.getElementById('keysModalList');
+  if (!keys.length) {
+    el.innerHTML = '<em style="color:#6e7681;font-size:12px">No keys yet — generate one below.</em>';
+    return;
+  }
+  el.innerHTML = keys.map(k => `
+    <div class="key-row">
+      <span class="key-prefix">${esc(k.key_prefix)}…</span>
+      <span class="key-label">${esc(k.label||'(no label)')}</span>
+      <span class="key-meta">${k.last_used ? 'Used '+new Date(k.last_used*1000).toLocaleDateString() : 'Never used'}</span>
+      ${k.revoked ? '<span style="color:#f85149;font-size:11px">Revoked</span>' :
+        `<button class="danger-btn" onclick="revokeKeyModal('${k.id}')">Revoke</button>`}
+    </div>`).join('');
+}
+
+async function genKeyModal() {
+  const label = document.getElementById('keysModalLabel').value.trim();
+  const r = await fetch('/api/admin/api-keys', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({label})
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    alert(formatErr(err));
+    return;
+  }
+  const data = await r.json();
+  const nk = document.getElementById('keysModalNew');
+  nk.style.display = 'block';
+  nk.textContent = `⚠ Copy now — shown only once:\n${data.key}`;
+  document.getElementById('keysModalLabel').value = '';
+  loadKeysModal();
+}
+
+async function revokeKeyModal(id) {
+  if (!confirm('Revoke this API key? Any instance using it will lose access.')) return;
+  await fetch(`/api/admin/api-keys/${id}`, {method:'DELETE'});
+  loadKeysModal();
 }
 
 // ── Users modal (admin only) ───────────────────────────────────────────────────
