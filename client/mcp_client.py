@@ -31,7 +31,7 @@ from typing import Optional
 
 import httpx
 import websockets
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 
 # ---------------------------------------------------------------------------
 # Config
@@ -70,6 +70,38 @@ def _detect_host_tool() -> str:
     if any(k for k in e if k.startswith("CONTINUE_")):    return "continue"
     if any(k for k in e if k.startswith("AIDER_")):       return "aider"
     return "unknown-mcp-host"
+
+
+async def _resolve_identity_from_mcp(ctx: Optional[Context]) -> Optional[str]:
+    """Try to pull a stable per-project identity from the MCP initialize
+    handshake. Returns a key like 'root:<uri>' or 'mcp-session:<id>',
+    or None if nothing usable is exposed.
+
+    This is the canonical signal: vendor-neutral, set by the host, and
+    persists across MCP child restarts (unlike CLAUDE_CODE_SESSION_ID).
+    """
+    if ctx is None:
+        return None
+    # list_roots() returns the workspace roots the host declared at init.
+    # First root is typically the active project folder.
+    try:
+        roots = await ctx.list_roots()
+        if roots:
+            first = roots[0]
+            uri = getattr(first, "uri", None) or getattr(first, "name", None)
+            if uri:
+                return f"root:{str(uri).lower()}"
+    except Exception:
+        pass
+    # Fallback: MCP session_id (stable within a single MCP host connection,
+    # changes across restarts — better than nothing, worse than a root).
+    try:
+        sid = getattr(ctx, "session_id", None)
+        if sid:
+            return f"mcp-session:{sid}"
+    except Exception:
+        pass
+    return None
 
 
 def _project_dir() -> str:
@@ -362,7 +394,7 @@ async def _ws_listener():
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def connect(name: str = "", instance_type: str = "claude-code", fresh: bool = False) -> str:
+async def connect(name: str = "", instance_type: str = "claude-code", fresh: bool = False, ctx: Context = None) -> str:
     """
     Register this instance with the AI Mesh server.
     Call this first before using any other tool.
@@ -378,7 +410,30 @@ async def connect(name: str = "", instance_type: str = "claude-code", fresh: boo
                (e.g. multiple Claude sessions in the same project dir).
                Wipes any saved instance_id locally before registering.
     """
-    global _cfg, _connected
+    global _cfg, _connected, _CWD_KEY
+
+    # If the env-var chain didn't give us a real identity key (we landed
+    # on cwd fallback), try the MCP initialize handshake. Roots from
+    # ctx.list_roots() are the vendor-neutral project signal we actually want.
+    if ctx is not None and not os.environ.get("AI_MESH_INSTANCE_KEY"):
+        # Only override when the current slot key looks like a cwd-fallback
+        # (i.e. not already a 'project:' / 'session:' / 'root:' tagged key).
+        if not any(_CWD_KEY.startswith(p) for p in ("project:", "session:", "root:", "mcp-session:")):
+            mcp_key = await _resolve_identity_from_mcp(ctx)
+            if mcp_key and mcp_key != _CWD_KEY:
+                # Migrate this process's slot to the new key (if no existing
+                # data lives there) and reload _cfg accordingly.
+                all_cfg = {}
+                try:
+                    if CONFIG_FILE.exists():
+                        all_cfg = json.loads(CONFIG_FILE.read_text())
+                except Exception:
+                    pass
+                if mcp_key not in all_cfg and _CWD_KEY in all_cfg:
+                    all_cfg[mcp_key] = all_cfg.pop(_CWD_KEY)
+                    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    CONFIG_FILE.write_text(json.dumps(all_cfg, indent=2))
+                _CWD_KEY = mcp_key
 
     _cfg = _load_cfg()
     http = _get_http()
@@ -596,7 +651,7 @@ async def set_name(name: str) -> str:
 
 
 @mcp.tool()
-async def my_info() -> str:
+async def my_info(ctx: Context = None) -> str:
     """
     Show this instance's registration + identity-detection details.
     Helps diagnose dedup/identity issues across multiple MCP hosts.
@@ -614,6 +669,20 @@ async def my_info() -> str:
             session_var, session_val = v, os.environ.get(v)
             break
 
+    # MCP-handshake signals (available only when called with a Context)
+    mcp_roots: list = []
+    mcp_session_id = None
+    if ctx is not None:
+        try:
+            mcp_session_id = getattr(ctx, "session_id", None)
+        except Exception:
+            pass
+        try:
+            for r in await ctx.list_roots():
+                mcp_roots.append(getattr(r, "uri", None) or getattr(r, "name", None) or str(r))
+        except Exception:
+            pass
+
     return json.dumps(
         {
             "instance_id":  _cfg.get("instance_id"),
@@ -629,6 +698,8 @@ async def my_info() -> str:
             "session_id_var":  session_var,
             "session_id":      session_val,
             "process_cwd":     str(Path.cwd()),
+            "mcp_session_id":  mcp_session_id,
+            "mcp_roots":       mcp_roots,
         },
         indent=2,
     )

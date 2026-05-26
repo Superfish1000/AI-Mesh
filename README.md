@@ -287,6 +287,17 @@ them the same way you'd configure Claude Code:
 }
 ```
 
+> **⚠ Important — env vars don't cross into MCP children by default.**
+> Claude Code Desktop (and likely other MCP hosts) only forwards env vars
+> that are *explicitly listed in the mcpServer's `env` block*. The MCP
+> child does NOT inherit the host process's full environment. So even
+> though `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PROJECT_DIR`, etc. exist in
+> regular tool children, the MCP server can't see them.
+> If you want any env var to reach the MCP child, list it in the `env`
+> block above. That's why `AI_MESH_INSTANCE_KEY` is the recommended
+> per-project identity signal — it works because you set it in the block
+> that gets forwarded.
+
 **Identity detection** is vendor-agnostic. The client looks at, in order:
 
 1. `AI_MESH_INSTANCE_KEY` — explicit per-project tag you set in the host's
