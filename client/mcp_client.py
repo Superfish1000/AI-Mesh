@@ -41,30 +41,60 @@ SERVER_URL: str = os.environ.get("AI_MESH_URL", "http://localhost:8000").rstrip(
 CONFIG_FILE: Path = Path.home() / ".ai-mesh" / "config.json"
 INCOMING_FILE: Path = Path.home() / ".ai-mesh" / "incoming.json"
 
+# Env vars various MCP hosts expose. Per-session IDs are checked first so
+# parallel sessions of the same host auto-distinguish. Project-dir env vars
+# come next so different repos under the same host get different identities.
+# Add new tools here as they're discovered.
+_SESSION_ID_VARS = (
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID",   # Claude Code (CLI / Desktop)
+    "CODEX_SESSION_ID", "OPENAI_CODEX_SESSION_ID",   # OpenAI Codex CLI
+    "CURSOR_SESSION_ID",                              # Cursor
+    "CONTINUE_SESSION_ID",                            # Continue.dev
+    "AIDER_SESSION_ID",                               # Aider
+)
+_PROJECT_DIR_VARS = (
+    "CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR",
+    "CODEX_PROJECT_DIR",
+    "CURSOR_WORKSPACE",
+    "INIT_CWD", "PWD",
+)
+
+
+def _detect_host_tool() -> str:
+    """Best-effort guess at which MCP host spawned us, for display in the GUI."""
+    e = os.environ
+    if any(k for k in e if k.startswith("CLAUDE_CODE_")): return "claude-code"
+    if any(k for k in e if k.startswith("CLAUDE_")):      return "claude"
+    if any(k for k in e if k.startswith("CODEX_")):       return "codex"
+    if any(k for k in e if k.startswith("CURSOR_")):      return "cursor"
+    if any(k for k in e if k.startswith("CONTINUE_")):    return "continue"
+    if any(k for k in e if k.startswith("AIDER_")):       return "aider"
+    return "unknown-mcp-host"
+
+
 def _project_dir() -> str:
     """Best-effort detection of this MCP child's identity key.
 
-    Claude Code Desktop spawns MCP children with a generic cwd, so cwd
-    alone can't distinguish sessions. Priority order:
-      1. AI_MESH_INSTANCE_KEY — explicit per-project tag in settings.json env
-                                (most stable; survives Claude restarts)
-      2. CLAUDE_CODE_SESSION_ID — per-Claude-session identity
-                                (auto-distinguishes parallel sessions;
-                                 NB: changes on each Claude restart, so
-                                 instance rows become stale)
-      3. CLAUDE_PROJECT_DIR / CLAUDE_WORKING_DIR — project-dir fallback
-      4. INIT_CWD / PWD — shell hand-offs
-      5. Path.cwd() — last resort
+    MCP hosts spawn their children with a generic cwd, so cwd alone can't
+    distinguish sessions. Priority order:
+      1. AI_MESH_INSTANCE_KEY — explicit tag in the host's mcp-server env block
+                                (most stable; survives host restarts)
+      2. Any per-session-id env var from _SESSION_ID_VARS (vendor-specific;
+                                auto-distinguishes parallel sessions but
+                                changes on each host restart)
+      3. Any project-dir env var from _PROJECT_DIR_VARS
+      4. Path.cwd() — last resort
 
     Users can also call set_project_id() at runtime to override per session.
     """
     explicit = os.environ.get("AI_MESH_INSTANCE_KEY")
     if explicit:
         return f"project:{explicit.strip()}"
-    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if session_id:
-        return f"session:{session_id.strip()}"
-    for var in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR", "INIT_CWD", "PWD"):
+    for var in _SESSION_ID_VARS:
+        v = os.environ.get(var)
+        if v:
+            return f"session:{v.strip()}"
+    for var in _PROJECT_DIR_VARS:
         v = os.environ.get(var)
         if v:
             return str(Path(v).resolve())
@@ -147,9 +177,14 @@ def _system_info() -> dict:
     }
     if pid_tag:
         info["project_id"] = pid_tag
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if sid:
-        info["claude_session_id"] = sid
+    info["host_tool"] = _detect_host_tool()
+    # Surface whichever session-id env was used (if any), keyed by its var name
+    for var in _SESSION_ID_VARS:
+        v = os.environ.get(var)
+        if v:
+            info["session_id_var"] = var
+            info["session_id"]     = v
+            break
     return info
 
 

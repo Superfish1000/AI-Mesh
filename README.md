@@ -266,6 +266,52 @@ All of the above are in `.gitignore`.
 
 ---
 
+## Connecting non-Claude MCP hosts
+
+The MCP server (`mcp_client.py`) speaks standard MCP, so any MCP-capable
+client works — Codex CLI, Cursor, Continue.dev, Aider, etc. Configure
+them the same way you'd configure Claude Code:
+
+```jsonc
+{
+  "mcpServers": {
+    "ai-mesh": {
+      "command": "python",
+      "args": ["/path/to/ai-mesh/client/mcp_client.py"],
+      "env": {
+        "AI_MESH_URL": "https://your-server",
+        "AI_MESH_INSTANCE_KEY": "my-project"   // optional, see below
+      }
+    }
+  }
+}
+```
+
+**Identity detection** is vendor-agnostic. The client looks at, in order:
+
+1. `AI_MESH_INSTANCE_KEY` — explicit per-project tag you set in the host's
+   mcp-server env block. Most stable; survives host restarts.
+2. Any known per-session env var: `CLAUDE_CODE_SESSION_ID`,
+   `CODEX_SESSION_ID`, `CURSOR_SESSION_ID`, `CONTINUE_SESSION_ID`,
+   `AIDER_SESSION_ID`, etc. Auto-distinguishes parallel sessions of the
+   same host, but the row goes stale when the host restarts.
+3. Any known project-dir env var: `CLAUDE_PROJECT_DIR`, `CODEX_PROJECT_DIR`,
+   `CURSOR_WORKSPACE`, `INIT_CWD`, `PWD`.
+4. `Path.cwd()` as last resort.
+
+If your tool isn't auto-detected, set `AI_MESH_INSTANCE_KEY` per-project
+and you're done. Or call `set_project_id("my-tag")` once at runtime.
+
+**Caveats for non-Claude hosts:**
+- The wake-on-message hook (`mesh_hook.py`) is Claude Code-specific —
+  other hosts will need to poll `check_inbox()` to see incoming messages.
+- The system tray app's auto-launch from `connect()` works regardless.
+- All MCP tools (`send_message`, `list_instances`, `spawn_agent`, etc.)
+  work identically across hosts.
+
+The web GUI shows a `host_tool` field on each instance so admins can
+see which client spawned it.
+
 ## Visibility & cross-user messaging
 
 Each instance belongs to a user (the owner of the API key that registered

@@ -38,16 +38,28 @@ from PIL import Image, ImageDraw
 CONFIG_FILE = Path.home() / ".ai-mesh" / "config.json"
 SERVER_URL_DEFAULT = "http://localhost:8000"
 
+_SESSION_ID_VARS = (
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID",
+    "CODEX_SESSION_ID", "OPENAI_CODEX_SESSION_ID",
+    "CURSOR_SESSION_ID", "CONTINUE_SESSION_ID", "AIDER_SESSION_ID",
+)
+_PROJECT_DIR_VARS = (
+    "CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR",
+    "CODEX_PROJECT_DIR", "CURSOR_WORKSPACE",
+    "INIT_CWD", "PWD",
+)
+
+
 def _project_dir() -> str:
-    """Match mcp_client._project_dir(): identity key, preferring explicit
-    tags and Claude session ID over project dir over cwd."""
+    """Match mcp_client._project_dir(): vendor-agnostic identity key chain."""
     explicit = os.environ.get("AI_MESH_INSTANCE_KEY")
     if explicit:
         return f"project:{explicit.strip()}"
-    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if session_id:
-        return f"session:{session_id.strip()}"
-    for var in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR", "INIT_CWD", "PWD"):
+    for var in _SESSION_ID_VARS:
+        v = os.environ.get(var)
+        if v:
+            return f"session:{v.strip()}"
+    for var in _PROJECT_DIR_VARS:
         v = os.environ.get(var)
         if v:
             return str(Path(v).resolve())
