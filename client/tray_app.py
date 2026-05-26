@@ -284,6 +284,13 @@ def _poll_loop(tray_icon: pystray.Icon):
             tray_icon.icon = ICON_CONNECTING  # amber = mixed
         tray_icon.title = _tray_title()
 
+        # Refresh the menu so the Instances submenu reflects current status.
+        try:
+            tray_icon.menu = _build_menu()
+            tray_icon.update_menu()
+        except Exception:
+            pass
+
         # Inbox poll (uses the active slot only — most-recent inbound history)
         if state.api_key and state.instance_id:
             data = _get("/api/instances")
@@ -851,10 +858,66 @@ def _hook_checked(mode: str):
 # Tray menu
 # ---------------------------------------------------------------------------
 
+def _remove_local_slot(cwd_key: str):
+    """Drop a cwd slot from config.json. Used to clean up stale tray entries."""
+    all_cfg = _read_all_cfg()
+    if cwd_key in all_cfg:
+        all_cfg.pop(cwd_key)
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(all_cfg, indent=2))
+
+
+def _instances_submenu() -> pystray.Menu:
+    """Build a submenu listing every local slot with status + a remove action."""
+    with state._lock:
+        slots = dict(state.per_slot)
+    all_cfg = _read_all_cfg()
+
+    # Include any cwd slots that lack credentials too (so the user can see why
+    # something they thought was registered doesn't show up).
+    items: list = []
+    seen = set()
+    for cwd, info in slots.items():
+        seen.add(cwd)
+        dot   = "●" if info.get("connected") else "○"
+        name  = info.get("name", "?")
+        iid   = info.get("instance_id", "?")
+        label = f"{dot} {name}  [{iid}]"
+        items.append(pystray.MenuItem(
+            label,
+            pystray.Menu(
+                pystray.MenuItem(f"cwd: {cwd[-50:] if len(cwd) > 50 else cwd}", None, enabled=False),
+                pystray.MenuItem(
+                    "Remove from local config",
+                    (lambda c=cwd: lambda _i, _it: _remove_local_slot(c))(),
+                ),
+            ),
+        ))
+    for cwd, cfg in all_cfg.items():
+        if cwd in seen:
+            continue
+        # Has no credentials — tray can't heartbeat it
+        label = f"· {cfg.get('name','(no name)')}  [no credentials]"
+        items.append(pystray.MenuItem(
+            label,
+            pystray.Menu(
+                pystray.MenuItem(f"cwd: {cwd[-50:] if len(cwd) > 50 else cwd}", None, enabled=False),
+                pystray.MenuItem(
+                    "Remove from local config",
+                    (lambda c=cwd: lambda _i, _it: _remove_local_slot(c))(),
+                ),
+            ),
+        ))
+    if not items:
+        items.append(pystray.MenuItem("(none registered)", None, enabled=False))
+    return pystray.Menu(*items)
+
+
 def _build_menu() -> pystray.Menu:
     return pystray.Menu(
         pystray.MenuItem("AI Mesh", None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Instances", _instances_submenu()),
         pystray.MenuItem("Configuration…", open_config, default=True),
         pystray.MenuItem("Inbox…",         open_inbox),
         pystray.Menu.SEPARATOR,
