@@ -637,8 +637,11 @@ def open_config(_icon=None, _item=None):
     sep3.pack(fill="x", padx=16, pady=4)
 
     # ── Instances on this machine (from config file) ──────────────────────────
-    Label(win, text="Registered on this machine", **lbl_cfg,
-          font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=16, pady=(4, 2))
+    # NB: lbl_cfg already includes 'font'; can't pass font= again or Python
+    # raises TypeError on the duplicate kwarg. Build a merged dict instead.
+    bold_lbl = {**lbl_cfg, "font": ("Segoe UI", 9, "bold")}
+    Label(win, text="Registered on this machine", **bold_lbl).pack(
+        anchor="w", padx=16, pady=(4, 2))
 
     local_frame = Frame(win, bg="#161b22", bd=0, relief="flat")
     local_frame.pack(fill="x", padx=16, pady=(0, 4))
@@ -697,8 +700,8 @@ def open_config(_icon=None, _item=None):
     refresh_local()
 
     # ── Server instance list (live) ───────────────────────────────────────────
-    Label(win, text="All server instances", **lbl_cfg,
-          font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=16, pady=(4, 2))
+    Label(win, text="All server instances", **bold_lbl).pack(
+        anchor="w", padx=16, pady=(4, 2))
 
     inst_frame = Frame(win, bg="#161b22", bd=0, relief="flat")
     inst_frame.pack(fill="x", padx=16, pady=(0, 8))
