@@ -138,6 +138,28 @@ def _tray_alive() -> bool:
     return True
 
 
+def _tray_spawn_env() -> dict:
+    """Build the env for the tray subprocess.
+
+    Override TCL_LIBRARY / TK_LIBRARY to paths derived from sys.executable —
+    stale system-wide values (e.g. left by other apps like CSR BlueSuite)
+    will otherwise crash tkinter inside the tray.
+    """
+    env = os.environ.copy()
+    py_dir = Path(sys.executable).parent
+    tcl_root = py_dir / "tcl"
+    if tcl_root.exists():
+        for sub in tcl_root.iterdir():
+            if not sub.is_dir():
+                continue
+            n = sub.name.lower()
+            if n.startswith("tcl") and (sub / "init.tcl").exists():
+                env["TCL_LIBRARY"] = str(sub)
+            elif n.startswith("tk") and (sub / "tk.tcl").exists():
+                env["TK_LIBRARY"] = str(sub)
+    return env
+
+
 def _ensure_tray_running() -> None:
     """Spawn tray_app.py detached if it isn't already running. Never raises."""
     if _cfg.get("auto_tray") is False:
@@ -147,7 +169,15 @@ def _ensure_tray_running() -> None:
     tray_path = Path(__file__).parent / "tray_app.py"
     if not tray_path.exists():
         return
+    # Log to a file so silent crashes are diagnosable.
+    log_path = TRAY_PID_FILE.parent / "tray.log"
     try:
+        TRAY_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        log_fp = open(log_path, "ab")
+    except Exception:
+        log_fp = subprocess.DEVNULL
+    try:
+        env = _tray_spawn_env()
         if sys.platform == "win32":
             DETACHED_PROCESS  = 0x00000008
             CREATE_NO_WINDOW  = 0x08000000
@@ -156,18 +186,19 @@ def _ensure_tray_running() -> None:
                 creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_fp,
+                stderr=log_fp,
+                env=env,
             )
         else:
             proc = subprocess.Popen(
                 [sys.executable, str(tray_path)],
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_fp,
+                stderr=log_fp,
+                env=env,
             )
-        TRAY_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         TRAY_PID_FILE.write_text(str(proc.pid))
     except Exception:
         # Never let tray-spawn failure break connect()
