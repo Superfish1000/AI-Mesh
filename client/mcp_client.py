@@ -113,7 +113,11 @@ async def _heartbeat_loop():
     while True:
         await asyncio.sleep(15)
         try:
-            await http.post("/api/heartbeat", headers=_headers())
+            await http.post(
+                "/api/heartbeat",
+                headers=_headers(),
+                json={"hook_mode": _cfg.get("hook_mode", "off")},
+            )
         except Exception:
             pass
 
@@ -146,6 +150,11 @@ async def _ws_listener():
                         continue
                     if msg.get("type") == "ping":
                         await ws.send(json.dumps({"type": "pong"}))
+                    elif msg.get("type") == "set_hook_mode":
+                        mode = msg.get("mode")
+                        if mode in HOOK_MODES:
+                            _cfg["hook_mode"] = mode
+                            _save_cfg(_cfg)
                     elif msg.get("type") == "message":
                         _inbox.append(msg)
                         # Cap buffer at 200 messages

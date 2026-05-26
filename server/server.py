@@ -112,6 +112,10 @@ class AdminManager:
 instances_ws = InstanceManager()
 admins_ws    = AdminManager()
 
+# In-memory per-instance runtime state (not persisted). Reset on server
+# restart; clients re-populate via heartbeats.
+_instance_runtime: dict[str, dict] = {}  # {instance_id: {"hook_mode": "off"}}
+
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
@@ -615,17 +619,29 @@ async def register(
 
 
 @app.post("/api/heartbeat")
-async def heartbeat(x_api_key: Optional[str] = Header(default=None)):
+async def heartbeat(request: Request, x_api_key: Optional[str] = Header(default=None)):
     key_row = _resolve_api_key(x_api_key)
     if not key_row:
         raise HTTPException(401, "Valid X-API-Key required")
-    # Update any instance owned by this key that is connected
+    # Optional body: {"hook_mode": "off|prompt|tool|both"}
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
     now = time.time()
     with db() as conn:
         conn.execute(
             "UPDATE instances SET last_seen = ?, connected = 1 WHERE owner_id = ?",
             (now, key_row["owner_id"]),
         )
+        # Stash hook_mode in memory keyed by all instances under this owner
+        if "hook_mode" in body and body["hook_mode"] in ("off", "prompt", "tool", "both"):
+            rows = conn.execute(
+                "SELECT id FROM instances WHERE owner_id = ?", (key_row["owner_id"],)
+            ).fetchall()
+            for r in rows:
+                _instance_runtime.setdefault(r["id"], {})["hook_mode"] = body["hook_mode"]
     return {"ok": True}
 
 
@@ -835,7 +851,12 @@ async def list_instances(mesh_session: Optional[str] = Cookie(default=None)):
                    ORDER BY i.last_seen DESC""",
                 (user["id"],),
             ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["hook_mode"] = _instance_runtime.get(d["id"], {}).get("hook_mode", "off")
+        out.append(d)
+    return out
 
 
 @app.get("/api/instances/{instance_id}")
@@ -862,7 +883,40 @@ async def get_instance(instance_id: str, mesh_session: Optional[str] = Cookie(de
                ORDER BY m.timestamp DESC LIMIT 50""",
             (instance_id, instance_id),
         ).fetchall()
-    return {"instance": dict(row), "messages": [dict(m) for m in msgs]}
+    inst_out = dict(row)
+    inst_out["hook_mode"] = _instance_runtime.get(instance_id, {}).get("hook_mode", "off")
+    return {"instance": inst_out, "messages": [dict(m) for m in msgs]}
+
+
+@app.post("/api/instances/{instance_id}/hook-mode")
+async def set_hook_mode(
+    instance_id: str,
+    request: Request,
+    mesh_session: Optional[str] = Cookie(default=None),
+):
+    user = _session_user(mesh_session)
+    if not user:
+        raise HTTPException(401, "Login required")
+    body = await request.json()
+    mode = body.get("mode")
+    if mode not in ("off", "prompt", "tool", "both"):
+        raise HTTPException(400, "mode must be one of off/prompt/tool/both")
+
+    with db() as conn:
+        inst = conn.execute(
+            "SELECT id, owner_id FROM instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+    if not inst:
+        raise HTTPException(404)
+    if inst["owner_id"] != user["id"] and not user["is_admin"]:
+        raise HTTPException(403, "Only the owner or an admin can change hook mode")
+
+    # Push to instance via WebSocket; client updates its local cfg + reports
+    # back the new value on the next heartbeat (which refreshes the GUI).
+    await instances_ws.send(instance_id, {"type": "set_hook_mode", "mode": mode})
+    # Optimistic: reflect immediately in our memory so the GUI sees it
+    _instance_runtime.setdefault(instance_id, {})["hook_mode"] = mode
+    return {"ok": True, "mode": mode}
 
 
 @app.post("/api/admin/message")
@@ -1393,6 +1447,23 @@ async function loadDetail(id) {
         <div class="val">${esc(inst.owner_username || '(none)')}</div>
       </div>
       <div class="detail-item">
+        <label>Hook Mode (wake-on-message)</label>
+        ${(isOwner || isAdmin) ? `
+          <div class="edit-row">
+            <select class="field" id="hookSelect">
+              <option value="off"    ${inst.hook_mode === 'off'    ? 'selected' : ''}>Off</option>
+              <option value="prompt" ${inst.hook_mode === 'prompt' ? 'selected' : ''}>On next prompt</option>
+              <option value="tool"   ${inst.hook_mode === 'tool'   ? 'selected' : ''}>On tool use</option>
+              <option value="both"   ${inst.hook_mode === 'both'   ? 'selected' : ''}>Both</option>
+            </select>
+            <button class="save-btn" onclick="saveHookMode('${inst.id}')">Save</button>
+          </div>
+          ${!inst.connected ? '<div style="color:#d29922;font-size:11px;margin-top:4px">Instance offline — change will apply on reconnect.</div>' : ''}
+        ` : `
+          <div class="val">${esc(inst.hook_mode || 'off')}</div>
+        `}
+      </div>
+      <div class="detail-item">
         <label>Visibility</label>
         ${(isOwner || isAdmin) ? `
           <div class="edit-row">
@@ -1526,6 +1597,19 @@ async function saveOverride(id) {
 async function saveNotes(id) {
   const val = document.getElementById('notesArea')?.value;
   await fetch(`/api/instances/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({notes:val})});
+}
+
+async function saveHookMode(id) {
+  const mode = document.getElementById('hookSelect')?.value;
+  const r = await fetch(`/api/instances/${id}/hook-mode`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({mode})
+  });
+  if (r.ok) loadDetail(id);
+  else {
+    const err = await r.json().catch(() => ({}));
+    alert(formatErr(err));
+  }
 }
 
 async function saveVisibility(id) {
