@@ -274,6 +274,7 @@ async def connect(name: str = "", instance_type: str = "claude-code") -> str:
                 _connected = True
                 asyncio.create_task(_heartbeat_loop())
                 asyncio.create_task(_ws_listener())
+                _ensure_tray_running()
                 iid = _cfg["instance_id"]
                 stored_name = _cfg.get("name", iid)
                 return (
