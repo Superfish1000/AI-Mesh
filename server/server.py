@@ -657,6 +657,7 @@ async def heartbeat(
     except Exception:
         pass
     now = time.time()
+    was_connected = bool(inst.get("connected"))
     with db() as conn:
         conn.execute(
             "UPDATE instances SET last_seen = ?, connected = 1 WHERE id = ?",
@@ -664,6 +665,11 @@ async def heartbeat(
         )
     if body.get("hook_mode") in ("off", "prompt", "tool", "both"):
         _instance_runtime.setdefault(inst["id"], {})["hook_mode"] = body["hook_mode"]
+    # Tell the admin GUI that this instance came back online via heartbeat.
+    # (cleanup_loop emits the disconnect event; without this the GUI would
+    # never see a reconnect that happens purely over HTTP.)
+    if not was_connected:
+        await admins_ws.broadcast({"type": "instance_connected", "id": inst["id"]})
     return {"ok": True}
 
 
