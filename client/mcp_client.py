@@ -1304,5 +1304,37 @@ async def kill_agent(job_id: str) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _spawn_tray_at_startup() -> None:
+    """Best-effort tray launch at MCP server startup so the icon appears
+    without requiring an explicit connect() call. Only spawns if there's
+    at least one existing config slot with credentials — fresh installs
+    with no saved config skip this and wait for the first connect()."""
+    try:
+        if not CONFIG_FILE.exists():
+            return
+        all_cfg = json.loads(CONFIG_FILE.read_text())
+        has_creds = any(
+            isinstance(s, dict) and s.get("api_key") and s.get("instance_id")
+            for s in all_cfg.values()
+        )
+        if not has_creds:
+            return
+        # Load whichever slot is the most likely match so _cfg is populated
+        # for _ensure_tray_running's auto_tray check.
+        global _cfg
+        _cfg = _load_cfg()
+        if not _cfg.get("api_key"):
+            # This process's slot is empty, but other slots have creds.
+            # Borrow auto_tray from the first such slot.
+            for s in all_cfg.values():
+                if isinstance(s, dict) and s.get("api_key"):
+                    _cfg = dict(s)  # in-memory only; not saved
+                    break
+        _ensure_tray_running()
+    except Exception:
+        pass  # never let tray spawn break the MCP server
+
+
 if __name__ == "__main__":
+    _spawn_tray_at_startup()
     mcp.run()
