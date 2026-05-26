@@ -486,7 +486,7 @@ async def api_ws_token(mesh_session: Optional[str] = Cookie(default=None)):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/admin/users")
-async def create_user(req: CreateUserRequest, _admin=..., mesh_session: Optional[str] = Cookie(default=None)):
+async def create_user(req: CreateUserRequest, mesh_session: Optional[str] = Cookie(default=None)):
     user = _session_user(mesh_session)
     if not user or not user["is_admin"]:
         raise HTTPException(403, "Admin required")
