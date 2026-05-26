@@ -42,12 +42,18 @@ INCOMING_FILE: Path = Path.home() / ".ai-mesh" / "incoming.json"
 def _project_dir() -> str:
     """Best-effort detection of the user's project directory.
 
-    Claude Code Desktop spawns MCP children with a generic cwd (often the
-    app install dir or the user's home), so Path.cwd() is the same value
-    for every session — it can't be used as a per-session identity key.
-    Prefer env vars Claude exposes about the active project; fall back to
-    cwd only as a last resort.
+    Claude Code Desktop spawns MCP children with a generic cwd, so cwd
+    alone can't distinguish sessions. Priority order:
+      1. AI_MESH_INSTANCE_KEY — explicit per-project tag in settings.json env
+      2. CLAUDE_PROJECT_DIR / CLAUDE_WORKING_DIR — if Claude exposes them
+      3. INIT_CWD / PWD — shell hand-offs
+      4. Path.cwd() — last resort
+
+    Users can also call set_project_id() at runtime to override per session.
     """
+    explicit = os.environ.get("AI_MESH_INSTANCE_KEY")
+    if explicit:
+        return f"project:{explicit.strip()}"
     for var in ("CLAUDE_PROJECT_DIR", "CLAUDE_WORKING_DIR", "INIT_CWD", "PWD"):
         v = os.environ.get(var)
         if v:
@@ -117,16 +123,21 @@ def _headers() -> dict:
 
 
 def _system_info() -> dict:
-    return {
+    pid_tag = _cfg.get("project_id")
+    cwd_val = f"project:{pid_tag}" if pid_tag else _project_dir()
+    info = {
         "hostname": socket.gethostname(),
         "platform": platform.system(),
         "platform_version": platform.version(),
         "python": platform.python_version(),
         "user": os.environ.get("USERNAME") or os.environ.get("USER", "unknown"),
-        "cwd": _project_dir(),
+        "cwd": cwd_val,
         "process_cwd": str(Path.cwd()),
         "pid": os.getpid(),
     }
+    if pid_tag:
+        info["project_id"] = pid_tag
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +585,65 @@ async def set_hook_mode(mode: str) -> str:
     if mode == "off":
         return "Hook injection disabled. Messages still buffered in check_inbox()."
     return f"Hook mode set to '{mode}'. Incoming messages will be injected into your Claude Code session."
+
+
+@mcp.tool()
+async def set_project_id(project_id: str) -> str:
+    """
+    Tag this Claude session with an explicit project identifier so multiple
+    sessions on the same machine don't collapse into a single shared
+    instance. Useful when Claude Code Desktop doesn't expose a per-project
+    env var to the MCP child.
+
+    Migrates this process's config slot to a new key and clears the saved
+    instance_id, so the next connect() registers a fresh, distinct instance
+    keyed on (owner, hostname, project_id) — the server-side dedup will
+    then keep this session separate from any other project on this machine.
+
+    For a permanent setup, also set AI_MESH_INSTANCE_KEY in the env block
+    of each project's .claude/settings.json mcp-server config.
+
+    Args:
+        project_id: A short identifier (e.g. 'projedex-app', 'ai-mesh').
+    """
+    global _cfg, _CWD_KEY
+    project_id = project_id.strip()
+    if not project_id:
+        return "Provide a non-empty project_id."
+
+    new_key = f"project:{project_id}"
+    old_key = _CWD_KEY
+
+    # Load the whole config, migrate the current slot to the new key if
+    # the destination is empty.
+    all_cfg: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            all_cfg = json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            pass
+
+    current = all_cfg.get(old_key, {})
+    target  = all_cfg.get(new_key, {})
+
+    if old_key != new_key and current and not target:
+        all_cfg[new_key] = current
+        all_cfg.pop(old_key, None)
+        target = current
+
+    target["project_id"] = project_id
+    target.pop("instance_id", None)  # force fresh registration
+
+    all_cfg[new_key] = target
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(all_cfg, indent=2))
+
+    _CWD_KEY = new_key
+    _cfg = target
+    return (
+        f"Project ID set to '{project_id}'. Config slot moved to '{new_key}'. "
+        f"Call connect() to register a fresh instance under this identity."
+    )
 
 
 @mcp.tool()
