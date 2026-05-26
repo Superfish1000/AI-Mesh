@@ -644,16 +644,18 @@ async def register(
     name          = body.get("name", "unknown")
     instance_type = body.get("instance_type", "claude-code")
     system_info   = body.get("system_info", {})
+    force_new     = bool(body.get("force_new", False))
     now = time.time()
 
     # Idempotency: if this owner already has an instance from the same
     # (hostname, cwd), reuse its row instead of creating a duplicate.
     # Lets clients freely wipe their local config, rotate keys, or delete the
     # instance row without piling up stale duplicates on the server.
+    # Skipped when the client explicitly asks for a new instance.
     sys_host = (system_info or {}).get("hostname", "")
     sys_cwd  = (system_info or {}).get("cwd", "")
     existing_id: Optional[str] = None
-    if sys_host and sys_cwd:
+    if sys_host and sys_cwd and not force_new:
         with db() as conn:
             rows = conn.execute(
                 "SELECT id, system_info FROM instances WHERE owner_id = ?",

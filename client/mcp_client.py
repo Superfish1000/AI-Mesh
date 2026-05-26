@@ -303,7 +303,7 @@ async def _ws_listener():
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def connect(name: str = "", instance_type: str = "claude-code") -> str:
+async def connect(name: str = "", instance_type: str = "claude-code", fresh: bool = False) -> str:
     """
     Register this instance with the AI Mesh server.
     Call this first before using any other tool.
@@ -312,6 +312,12 @@ async def connect(name: str = "", instance_type: str = "claude-code") -> str:
     Args:
         name: Display name for this instance. Defaults to hostname-pid.
         instance_type: Type label, e.g. 'claude-code', 'claude-api', 'worker'.
+        fresh: If True, force a brand-new instance row even if the server
+               already has one matching (owner, hostname, cwd). Use when
+               you want a distinct identity for this session and the
+               server-side dedup keeps collapsing you onto an existing one
+               (e.g. multiple Claude sessions in the same project dir).
+               Wipes any saved instance_id locally before registering.
     """
     global _cfg, _connected
 
@@ -327,7 +333,11 @@ async def connect(name: str = "", instance_type: str = "claude-code") -> str:
             "3. Copy the key (shown only once) and run: set_api_key('mesh_...')"
         )
 
-    # Try to reconnect if already registered
+    # If fresh=True, drop any saved instance_id and force a new server-side row
+    if fresh:
+        _cfg.pop("instance_id", None)
+
+    # Try to reconnect if already registered (skipped when fresh=True)
     if _cfg.get("instance_id"):
         try:
             r = await http.post("/api/heartbeat", headers=_headers())
@@ -349,14 +359,17 @@ async def connect(name: str = "", instance_type: str = "claude-code") -> str:
     if not name:
         name = f"{socket.gethostname()}-{os.getpid()}"
 
+    register_body: dict = {
+        "name": name,
+        "instance_type": instance_type,
+        "system_info": _system_info(),
+    }
+    if fresh:
+        register_body["force_new"] = True
     r = await http.post(
         "/api/register",
         headers=_headers(),
-        json={
-            "name": name,
-            "instance_type": instance_type,
-            "system_info": _system_info(),
-        },
+        json=register_body,
     )
     r.raise_for_status()
     data = r.json()
