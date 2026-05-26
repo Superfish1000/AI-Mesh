@@ -241,22 +241,76 @@ TRAY_PID_FILE: Path = Path.home() / ".ai-mesh" / "tray.pid"
 
 
 def _tray_alive() -> bool:
-    """Return True if the PID file points at a running process."""
+    """Return True if the PID file points at a running tray_app.py process.
+
+    Verifies the process actually IS our tray (not a recycled PID) by
+    checking its command line. Falls back to a PID-only check if we can't
+    introspect the process (no psutil installed, denied access, etc.).
+    """
     if not TRAY_PID_FILE.exists():
         return False
     try:
         pid = int(TRAY_PID_FILE.read_text().strip())
     except (ValueError, OSError):
         return False
+
+    # First, is there ANY process with this PID?
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False  # PID gone
-    except PermissionError:
-        return True   # exists but owned by another user — still "alive"
     except OSError:
+        # On Windows, PermissionError lands here for processes we can't
+        # query. Most of the time that means it's NOT our tray (different
+        # user / system process recycled the PID). Treat as dead.
         return False
-    return True
+
+    # PID is alive — confirm it's actually our tray, not a recycled PID.
+    try:
+        import psutil   # type: ignore
+    except ImportError:
+        return True  # No psutil; trust the PID
+    try:
+        cmdline = " ".join(psutil.Process(pid).cmdline())
+        return "tray_app.py" in cmdline
+    except Exception:
+        return True
+
+
+@mcp.tool()
+async def tray_status() -> str:
+    """
+    Diagnose why the system-tray app may or may not be running.
+    Reports the auto_tray setting, the PID file's contents, whether
+    that PID is actually our tray, and the last lines of tray.log.
+    """
+    out = []
+    out.append(f"auto_tray (cfg):  {_cfg.get('auto_tray', True)}")
+    out.append(f"pid_file:         {TRAY_PID_FILE}")
+    if TRAY_PID_FILE.exists():
+        try:
+            pid_text = TRAY_PID_FILE.read_text().strip()
+        except Exception as e:
+            pid_text = f"(read error: {e})"
+        out.append(f"pid_file content: {pid_text}")
+    else:
+        out.append("pid_file content: (file does not exist)")
+    out.append(f"_tray_alive():    {_tray_alive()}")
+
+    # Last lines of the tray log (where the tray's own stderr lands)
+    log_path = TRAY_PID_FILE.parent / "tray.log"
+    out.append(f"log_path:         {log_path}")
+    if log_path.exists():
+        try:
+            text = log_path.read_text(errors="replace")
+            tail = "\n".join(text.splitlines()[-25:])
+            out.append("--- tray.log (last 25 lines) ---")
+            out.append(tail if tail.strip() else "(empty)")
+        except Exception as e:
+            out.append(f"(could not read log: {e})")
+    else:
+        out.append("(log file does not exist)")
+    return "\n".join(out)
 
 
 def _tray_spawn_env() -> dict:
